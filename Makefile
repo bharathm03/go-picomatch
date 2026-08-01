@@ -51,11 +51,11 @@ cover:
 
 # --- Behavioural parity ------------------------------------------------------
 
-## conformance: replay upstream's recorded behaviour and report the parity rate.
-## Reports only. Set PICOMATCH_PARITY_MIN=95 to make it a gate.
+## conformance: replay recorded behaviour and report the parity rate, per fixture
+## set. Reports only. Set PICOMATCH_PARITY_MIN=95 to make it a gate.
 .PHONY: conformance
 conformance:
-	$(GO) test -tags conformance -run TestConformance -v $(PKG)
+	$(GO) test -tags conformance -run 'TestConformance|TestCharacterAxis' -v $(PKG)
 
 # --- Test-extraction pipeline (needs Node; not required to build or test) ----
 
@@ -78,6 +78,16 @@ verify-original:
 .PHONY: extract
 extract: verify-original
 	cd $(EXTRACT) && node extract.js
+
+## charaxis: regenerate the supplementary character-domain fixtures
+.PHONY: charaxis
+charaxis: verify-original
+	node tools/charaxis/generate.js
+
+## mutate: measure what the fixture sets can detect (see tools/mutate/README.md)
+.PHONY: mutate
+mutate: verify-original
+	node tools/mutate/run.js
 
 ## help: list targets
 .PHONY: help

@@ -126,6 +126,38 @@ watched as it climbs. To make it a gate:
 PICOMATCH_PARITY_MIN=95 make conformance
 ```
 
+### What the fixtures cannot see
+
+A parity percentage says how much recorded behaviour a port reproduces. It never
+says what the recording left out. `make mutate` answers that: it applies a
+mutation to upstream, replays every fixture against the mutant, and counts how
+many detect it. A mutation nothing detects is behaviour a port could get wrong
+while every number here still read clean.
+
+Five plausible Go-port choices survive all 18,792 comparable fixtures — walking
+by rune instead of UTF-16 code unit, `nocase` via Unicode folding, a globstar
+body that crosses newlines, `maxLength` counted in code points, and skipping the
+inline fastpaths. Two controls are detected by 29 and 34 fixtures, so the
+instrument is not dead.
+
+The cause is not weak testing upstream. The suite is exhaustive *structurally*
+and thin *alphabetically*: **91 distinct code points** across every pattern and
+input it uses, four of them non-ASCII. A structural corpus has no reason to
+contain an astral character or a newline.
+
+So there is a second fixture set, `testdata/charaxis`, covering exactly those
+holes — generated the same honest way, by recording what picomatch does, and
+reported separately so the headline parity number stays derived purely from
+upstream's own tests. `make mutate` verifies it kills all five on every run.
+
+```bash
+make mutate      # measure both fixture sets
+make charaxis    # regenerate the character-domain fixtures
+```
+
+See [tools/mutate/README.md](tools/mutate/README.md) and
+[DECISIONS.md](DECISIONS.md) §7.
+
 ### Re-running extraction
 
 Only needed if the fixtures are regenerated; requires Node ≥ 18.
@@ -179,7 +211,10 @@ gets a field marked as unexercised (`contains`, `fastpaths`, `literalBrackets`,
 | `fixtures_test.go`      | Guards the extraction pipeline's output                          |
 | `tests/original/`       | Upstream picomatch v4.0.5, unmodified and hash-pinned            |
 | `testdata/original/`    | Recorded behaviours + extraction summary                         |
+| `testdata/charaxis/`    | Supplementary character-domain fixtures                          |
 | `tools/extract/`        | The recorder (Node; build-time only)                             |
+| `tools/mutate/`         | Measures what each fixture set can detect                        |
+| `tools/charaxis/`       | Generates the character-domain fixtures                          |
 | `DECISIONS.md`          | Every non-trivial divergence from the original, with rationale   |
 
 ## No source-language runtime

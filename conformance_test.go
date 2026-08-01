@@ -29,8 +29,19 @@ import (
 
 const fixturePath = "testdata/original/cases.jsonl"
 
+// charAxisPath holds the supplementary fixtures covering the character domain.
+//
+// It is kept separate from testdata/original, and reported separately, on
+// purpose. testdata/original is recorded from picomatch's own unmodified suite
+// and nobody chose its contents, which is exactly what makes the parity number
+// worth quoting. These cases were chosen — by `tools/mutate/run.js` showing five
+// plausible port mistakes that no upstream fixture detects — so folding them
+// into the same percentage would quietly mix a measurement with a target.
+const charAxisPath = "testdata/charaxis/cases.jsonl"
+
 // reportPath is written on every run so progress is reviewable over time.
 const reportPath = "conformance-report.json"
+const charAxisReportPath = "charaxis-report.json"
 
 // apiStat tracks one API's replay outcome.
 type apiStat struct {
@@ -54,15 +65,48 @@ type report struct {
 }
 
 func TestConformance(t *testing.T) {
-	cases, err := testcase.Load(fixturePath)
-	if err != nil {
-		t.Fatalf("load fixtures: %v\n\nRun `make extract` to generate them.", err)
+	rep := replaySet(t, fixturePath, "Run `make extract` to generate them.")
+	writeReport(t, &rep, reportPath)
+	logReport(t, &rep, reportPath)
+
+	if min := parityFloor(t); rep.ParityPct < min {
+		t.Fatalf("parity %.2f%% is below the required %.2f%%", rep.ParityPct, min)
 	}
-	if len(cases) == 0 {
-		t.Fatal("fixture file is empty")
+}
+
+// TestCharacterAxis replays the supplementary character-domain fixtures.
+//
+// Reported separately from TestConformance so the headline parity figure stays
+// derived purely from upstream's own tests. Each case here exists because
+// tools/mutate/run.js proved the upstream suite cannot detect a specific
+// mistake; see testdata/charaxis/summary.json for which mutation each axis kills.
+func TestCharacterAxis(t *testing.T) {
+	if _, err := os.Stat(charAxisPath); errors.Is(err, os.ErrNotExist) {
+		t.Skip("character-axis fixtures not generated; run `make charaxis`")
 	}
 
-	rep := report{Fixture: fixturePath, Cases: len(cases), ByAPI: map[string]*apiStat{}}
+	rep := replaySet(t, charAxisPath, "Run `make charaxis` to generate them.")
+	writeReport(t, &rep, charAxisReportPath)
+	logReport(t, &rep, charAxisReportPath)
+
+	if min := floorFor(t, "PICOMATCH_CHARAXIS_MIN"); rep.ParityPct < min {
+		t.Fatalf("character-axis parity %.2f%% is below the required %.2f%%", rep.ParityPct, min)
+	}
+}
+
+// replaySet replays one fixture file and returns its report.
+func replaySet(t *testing.T, path, hint string) report {
+	t.Helper()
+
+	cases, err := testcase.Load(path)
+	if err != nil {
+		t.Fatalf("load fixtures: %v\n\n%s", err, hint)
+	}
+	if len(cases) == 0 {
+		t.Fatalf("fixture file is empty: %s", path)
+	}
+
+	rep := report{Fixture: path, Cases: len(cases), ByAPI: map[string]*apiStat{}}
 
 	for i := range cases {
 		c := &cases[i]
@@ -103,13 +147,7 @@ func TestConformance(t *testing.T) {
 	if comparable > 0 {
 		rep.ParityPct = 100 * float64(rep.Passed) / float64(comparable)
 	}
-
-	writeReport(t, &rep)
-	logReport(t, &rep)
-
-	if min := parityFloor(t); rep.ParityPct < min {
-		t.Fatalf("parity %.2f%% is below the required %.2f%%", rep.ParityPct, min)
-	}
+	return rep
 }
 
 type status int
@@ -570,34 +608,36 @@ func TestMatcherExemptionsAreDeclared(t *testing.T) {
 	}
 }
 
-func parityFloor(t *testing.T) float64 {
+func parityFloor(t *testing.T) float64 { return floorFor(t, "PICOMATCH_PARITY_MIN") }
+
+func floorFor(t *testing.T, env string) float64 {
 	t.Helper()
-	raw := os.Getenv("PICOMATCH_PARITY_MIN")
+	raw := os.Getenv(env)
 	if raw == "" {
 		return 0
 	}
 	min, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
-		t.Fatalf("PICOMATCH_PARITY_MIN=%q is not a number", raw)
+		t.Fatalf("%s=%q is not a number", env, raw)
 	}
 	return min
 }
 
-func writeReport(t *testing.T, rep *report) {
+func writeReport(t *testing.T, rep *report, path string) {
 	t.Helper()
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		t.Fatalf("encode report: %v", err)
 	}
-	if err := os.WriteFile(filepath.Clean(reportPath), append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Clean(path), append(data, '\n'), 0o644); err != nil {
 		t.Fatalf("write report: %v", err)
 	}
 }
 
-func logReport(t *testing.T, rep *report) {
+func logReport(t *testing.T, rep *report, reportedTo string) {
 	t.Helper()
-	t.Logf("cases=%d replayable=%d passed=%d failed=%d unsupported=%d parity=%.2f%%",
-		rep.Cases, rep.Replayable, rep.Passed, rep.Failed, rep.Unsupported, rep.ParityPct)
+	t.Logf("%s: cases=%d replayable=%d passed=%d failed=%d unsupported=%d parity=%.2f%%",
+		rep.Fixture, rep.Cases, rep.Replayable, rep.Passed, rep.Failed, rep.Unsupported, rep.ParityPct)
 
 	keys := make([]string, 0, len(rep.ByAPI))
 	for k := range rep.ByAPI {
@@ -610,5 +650,5 @@ func logReport(t *testing.T, rep *report) {
 		t.Logf("  %-26s total=%-6d passed=%-6d failed=%-6d unsupported=%d",
 			k, s.Total, s.Passed, s.Failed, s.Unsupported)
 	}
-	t.Logf("report written to %s", reportPath)
+	t.Logf("report written to %s", reportedTo)
 }

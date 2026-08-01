@@ -37,6 +37,7 @@ node_modules/
 
 # Written by `make conformance` on every run.
 conformance-report.json
+charaxis-report.json
 
 # NOTE: testdata/original/ is generated but deliberately committed. It is the
 # evidence the parity claim rests on, and committing it means `go test` works

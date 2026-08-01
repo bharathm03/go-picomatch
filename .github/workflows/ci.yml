@@ -54,7 +54,7 @@ jobs:
       - name: Conformance report
         # Reports the parity rate without gating on it; the number is expected to
         # climb from zero as the port lands.
-        run: go test -tags conformance -run TestConformance -v ./...
+        run: go test -tags conformance -run 'TestConformance|TestCharacterAxis' -v ./...
 
       - uses: actions/upload-artifact@v4
         if: always() && matrix.os == 'ubuntu-latest'
@@ -64,7 +64,7 @@ jobs:
           if-no-files-found: warn
 
   upstream-integrity:
-    name: Upstream suite unmodified
+    name: Fixture integrity
     runs-on: ubuntu-latest
 
     steps:
@@ -79,3 +79,17 @@ jobs:
       # quietly inflating the parity number.
       - name: Verify upstream test-suite hashes
         run: node tools/extract/verify.js
+
+      # What the fixtures CAN'T see. Fails if a mutation the suite used to detect
+      # now survives, if a mutation turns out to be a no-op, or if any mutation
+      # escapes every fixture set. tests/original is only ever read; every edit
+      # lands in a temp copy.
+      - name: Fixture-set coverage (mutation harness)
+        run: node tools/mutate/run.js
+
+      # The character-axis fixtures are generated, and committed. Regenerating
+      # must be a no-op: a diff here means they were hand-edited.
+      - name: Character-axis fixtures are reproducible
+        run: |
+          node tools/charaxis/generate.js
+          git diff --exit-code -- testdata/charaxis/
