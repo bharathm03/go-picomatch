@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> Note: Do not create new branch unless asked or confirmed
+
 ## What this repo is
 
 A Go port of [picomatch](https://github.com/micromatch/picomatch) v4.0.5 (Port
