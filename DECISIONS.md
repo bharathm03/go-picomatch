@@ -190,6 +190,30 @@ unsupported, and the matcher keys `match` and `regex` are listed in
 harness does not compare fails the case as unsupported — see
 `TestCompareFieldsRejectsUncomparedKeys`.
 
+**Using parser state as an internal oracle is a different thing, and this is not
+a quiet reversal.** `testdata/tokens/` records upstream's token stream for 1,491
+patterns and `TestTokenParity` replays it against `internal/parse`. What §6
+refuses is *promising* that state to callers and *counting* it as behavioural
+parity; neither happens. `internal/parse` is unreachable outside this module, the
+result is written to its own report under its own name, and it is never folded
+into the parity percentage.
+
+It earns its place by being a different kind of evidence. Conformance replays
+behaviour, so it cannot move until the scanner, the emitter and the matcher all
+work — it reads 0% for the entire time the parser is being written. The token
+gate is available from the first token the scanner emits, and it localises: if
+tokens differ it is a parser bug, and if tokens match while behaviour differs it
+is not. The cost of being wrong about this is bounded — a fixture nobody quotes —
+and the cost of *not* having it is months of a single number that says nothing.
+
+Two properties keep it honest. It is not independent evidence: the pattern list
+is inherited from upstream's suite rather than chosen, so it can only assert
+structure over patterns that suite happened to use. And its records carry the
+measured `fastpath` / `fastpathDiverges` flags, because for the 67 patterns
+where a fast path compiled different source, matching these tokens does not
+settle what `makeRe` produced. The gate stratifies on that and reports both
+numbers rather than filtering the awkward ones out.
+
 ---
 
 ## 7. Parity is reported against two fixture sets, measured separately
@@ -201,7 +225,7 @@ exercises, and a percentage never says what it left out.
 
 **What the measurement showed.** `tools/mutate/run.js` applies a mutation to
 upstream, replays every fixture against the mutant, and counts how many detect
-it. Five plausible Go-port choices survive all 18,792 comparable fixtures:
+it. Six plausible Go-port choices survive all 18,792 comparable fixtures:
 
 | Mutation | detected by |
 | --- | ---: |
@@ -209,7 +233,8 @@ it. Five plausible Go-port choices survive all 18,792 comparable fixtures:
 | `nocase` via Unicode folding rather than JS `Canonicalize` | **0** |
 | globstar body as "any character" | **0** |
 | `maxLength` counted in code points | **0** |
-| no inline fastpaths | **0** |
+| skip `parse.fastpaths()` — the top path at `picomatch.js:312` | **0** |
+| skip the inline fast path at `parse.js:606` | **0** |
 
 Two controls (dropping the `?` dot guard, dropping the `input === glob`
 shortcut) are detected by 29 and 34, so the instrument is not dead.
@@ -247,8 +272,18 @@ the file and fails on any diff, so a hand-edited expectation cannot survive.
 
 **Re-check.** `make mutate`. It fails if a mutation the suite used to detect now
 survives, if a mutation is a no-op (its result would be meaningless), or if any
-mutation escapes both fixture sets. The `charaxis` column killing all five holes
+mutation escapes both fixture sets. The `charaxis` column killing all six holes
 is verified on every run, not asserted here.
+
+The sixth was found by splitting a mutation, not by adding one. `no-fastpaths`
+was named for picomatch's inline fast path but its edit disabled the top-level
+one, so the inline site had never been measured — and the top path's 6 kills made
+the pair look covered. Split into `no-top-fastpaths` and `no-inline-fastpath`,
+the inline site came back 0/0, and `testdata/charaxis`'s `fastpaths-inline` axis
+now kills it with 8. **A mutation that does not edit what its name claims does
+not measure what its result implies**, which is the same failure mode as a
+witness that proves nothing — and the reason both are checked rather than
+trusted.
 
 ---
 

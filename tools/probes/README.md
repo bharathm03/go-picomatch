@@ -44,11 +44,11 @@ the highest-risk area — globstar boundary semantics, `a/**` matching `a` — i
 
 ```
 distinct string patterns          1,493
-  parse.fastpaths() eligible        382
+  parse.fastpaths() eligible        382   <- eligible, not used: only 25 take it
   inline fastpath eligible          153
   compared (either, parseable)      509
 
-regex SOURCE differs fast vs slow   172 patterns   3,104 records
+regex SOURCE differs fast vs slow   172 patterns   3,104 records   <- INFLATED, see below
 BEHAVIOUR differs (len <= 5)         37 patterns     480 records
   of those, expected=true                            238
 records that set `fastpaths`                           0
@@ -62,13 +62,49 @@ The fast paths are **not** a pure optimisation:
 "**/*.md" matches "m.md/"   fast=true   slow=false
 ```
 
-**Why this shapes the port.** No record sets `fastpaths`, so all of them assert
-*default* behaviour — which for those 480 is *fastpath* behaviour. A port with
-one parser implementing full-scanner semantics fails them, and the failures
-present as unrelated dot-handling and trailing-slash bugs scattered across the
-suite. Implement full-scanner semantics as the AST and model the fast path as
-what it architecturally is: a separate normalisation pass behind a `Fastpaths`
-option, default on.
+**Read those 480 records carefully — an earlier revision of this file did not.**
+It said a full-scanner-only port "fails them". It does not. 480 records *carry* a
+pattern that can diverge; none of them pair it with an input where it *does*.
+Replaying all 18,064 replayable boolean-verdict records under `{fastpaths:false}`
+changes **0 answers**, and `tools/mutate` had already recorded the same thing
+independently (`no-fastpaths`: 0 upstream kills, 6 charaxis kills, witnesses
+genuinely diverging). Two probes disagreed and the enumerating one was believed;
+the corpus replay settles it.
+
+The general trap: *records containing a divergent pattern* is not *records that
+would fail*. Divergence needs a divergent input too, and this corpus supplies
+patterns far more adventurously than inputs — the suite is structural, not
+alphabetic (see `tools/mutate/README.md`).
+
+**The 172 above is inflated, for a reason worth knowing.** The inline fast path
+calls `utils.wrapOutput` inside `parse()` (`parse.js:653`), so its `state.output`
+is already `^(?:X)$` while the scanner's is a bare `X` that `compileRe` anchors
+later. Comparing them raw marks every inline pattern divergent regardless of what
+it produced — `.dotfile` compiles to `^(?:\.dotfile)$` against `\.dotfile` and
+scores a divergence. Unwrap the inline side and the real count is **67**:
+
+```
+top    (25) : 18 structural · 5 add a trailing slash · 2 identical
+inline (149): 105 identical once unwrapped · 28 where the SCANNER is
+              the lenient one · 16 different, mostly \! \' \- escaping noise
+```
+
+This probe still prints the raw 172; `lib/corpus.js` carries the corrected
+comparison, and `testdata/tokens/` records 67.
+
+**And "the fast paths are more lenient" is not a safe shorthand.** It runs both
+ways: the top path adds `\/?` on 5 patterns, and the scanner adds it on 28 the
+inline path leaves strict.
+
+**What actually shapes the port.** The divergence is real, just unexercised
+upstream — `*.js` matches `"a.js/"` on the fast path and not on the scanner — so
+it is behaviour a consumer would notice, worth **175 patterns and ~110 lines**
+against the scanner's ~716. It is not a parser and it is **not a flag either**:
+18 of the 25 top-path patterns differ structurally, handling the globstar prefix
+as `(?:X\/)?` where the scanner emits `(?:^|\/|X\/)`. Build full-scanner
+semantics as the AST and model the fast path as a separate normalisation pass
+behind a `Fastpaths` option, default on. Doing it that way also keeps the
+decision reversible, which the evidence above says it should be.
 
 **The count is a lower bound, and the bound bites.** At `MAXLEN=4` this probe
 reported 28 patterns on the research corpus; at 5 it finds 37. The binding
@@ -95,7 +131,14 @@ text 2642  slash 1646  bos 1491  star 1390  paren 1189  maybe_slash 334
 globstar 316  negate 267  qmark 263  bracket 248  brace 233  dot 190
 comma 182  plus 97  at 70
 
-fields: type/value/output (string) · extglob/star (bool) · outputIndex/tokensIndex (int)
+fields (9): type/value/output (string) · extglob/posix/comma/star (bool)
+            outputIndex/tokensIndex (int)
+
+which parser makeRe really used
+  full scanner ("none")   1,316   <- tokens ARE what makeRe compiled
+  parse.fastpaths()          25
+  inline fastpath           150
+  of those, source differs   67   <- 34 structural + 33 trailing-slash
 
 state.backtrack set    77 patterns   <- output discarded and rebuilt
   risky-extglob subset 12 patterns
@@ -104,6 +147,12 @@ patterns containing "**"   354
   globstar token emitted   272
   no globstar token         82        <- causes are mixed, not distinguished
 ```
+
+This probe stays a diagnostic. The *fixture* the Go token gate replays is
+written by `tools/tokens/generate.js` into `testdata/tokens/` — same
+measurement, same shared helpers in `lib/corpus.js`, but committed and
+replayable, where everything under `testdata/probes/` is regenerated on demand
+and gitignored.
 
 Two further rewrites do **not** set the flag because they truncate the output by
 hand: `push()` demotes an already-emitted globstar to a star and slices the
@@ -188,14 +237,25 @@ void.**
 
 ## Limits worth knowing before you trust a number
 
-- **The token oracle is void for the 382 fastpath-eligible patterns.**
-  `picomatch.parse` is `parse(pattern, { fastpaths: false })`
-  (`lib/picomatch.js:212`), so it always runs the full scanner — but `makeRe`
-  does not. For those patterns the token stream describes a code path that did
-  not run. `coverage-diff.js` calls `pm.parse` and inherits the same caveat;
+- **Eligibility is not use, and an earlier revision of this file conflated
+  them.** It said the token oracle was void for "the 382 fastpath-eligible
+  patterns". Measured, only **25** of those 382 actually take
+  `parse.fastpaths()`: `picomatch.js:311-317` calls it for every pattern
+  starting `.` or `*`, then falls through to the full scanner whenever the
+  result is falsy, which it usually is. Counting the inline path too, 175
+  patterns take a fast path and **172** compile to different source. So the
+  caveat is real but a fifth the size — and quoting 382 would have justified
+  building a fastpath pass far larger than the evidence supports.
+  `token-inventory.js` and `testdata/tokens/` now carry the measured flag per
+  pattern (`fastpath`, `fastpathDiverges`), so this is stratified rather than
+  assumed. `coverage-diff.js` calls `pm.parse` and inherits the same caveat;
   diffing two patterns is still valid since both sides take the same path.
-  Any `tokens.jsonl` must carry a fastpath flag per pattern or it asserts the
-  wrong oracle for a quarter of the corpus.
+- **The fastpath flag is measured, never transcribed.** The inline condition at
+  `parse.js:606` tests the input *after* `utils.removePrefix` rewrote it at
+  `:430`, so `./foo` looks ineligible (it contains a `/`) while the scanner
+  actually sees `foo` and takes the fast path. Five corpus patterns differ
+  between the two readings; `token-inventory.js` reports the disagreement on
+  every run rather than trusting either.
 - **Enumeration is bounded.** Length 5 over at most 7 characters, and only over
   patterns the corpus contains. Everything it reports is a lower bound.
 - **The rewrite-site inventory is read, not exhaustively instrumented.** Only

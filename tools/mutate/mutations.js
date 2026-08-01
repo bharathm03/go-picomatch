@@ -81,14 +81,37 @@ const MUTATIONS = [
     witnesses: [['\u{1F600}'.repeat(300) + '*', 'x', { maxLength: 400 }]],
     expected: 'survives'
   },
+  // picomatch has TWO fast paths, at different sites, and they are separate
+  // porting decisions. An earlier revision had one mutation named for the inline
+  // path whose edit disabled the top-level one, so the inline path was never
+  // measured at all. They are split below and each names the site it edits.
   {
-    name: 'no-fastpaths',
-    why: 'Never take the inline fast path. It is not just a shortcut: it changes the compiled ' +
-         'output, adding trailing-slash leniency the full scanner does not.',
+    name: 'no-top-fastpaths',
+    why: 'Skip parse.fastpaths() — the whitelist at lib/parse.js:1330 that makeRe consults ' +
+         'when a pattern starts "." or "*" (lib/picomatch.js:312). Not a shortcut: it appends ' +
+         'an optional trailing slash unless strictSlashes, and 18 of its 25 corpus patterns ' +
+         'also compile structurally differently, handling the globstar prefix as (?:X\\/)? ' +
+         'where the scanner emits (?:^|\\/|X\\/).',
     edits: [['lib/picomatch.js',
       "if (options.fastpaths !== false && (input[0] === '.' || input[0] === '*')) {",
       "if (false && (input[0] === '.' || input[0] === '*')) {"]],
-    witnesses: [['*.js', 'a.js/'], ['.*', '.x/']],
+    witnesses: [['*.js', 'a.js/'], ['**/*.md', 'm.md/']],
+    expected: 'survives'
+  },
+  {
+    name: 'no-inline-fastpath',
+    why: 'Skip the inline fast path at lib/parse.js:606 — the early return inside parse() for ' +
+         'patterns with no /()[]{}" that do not start * or !. It is the STRICTER of the two: ' +
+         'on 28 corpus patterns the full scanner appends a trailing-slash allowance that this ' +
+         'path does not, so skipping it makes a port more lenient, not less.',
+    edits: [['lib/parse.js',
+      'if (opts.fastpaths !== false && !/(^[*!]|[/()[\\]{}"])/.test(input)) {',
+      'if (false && !/(^[*!]|[/()[\\]{}"])/.test(input)) {']],
+    // Both witnesses are inline-eligible and NOT top-eligible, so they isolate
+    // this site; both land on the trailing-slash difference, which is the whole
+    // observable delta here. `a.js`/`a.js/` looks like the obvious witness and
+    // is not one — it answers false either way.
+    witnesses: [['a*', 'aa/'], ['?*', 'ab/']],
     expected: 'survives'
   }
 ];

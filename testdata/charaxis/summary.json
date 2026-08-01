@@ -3,14 +3,15 @@
   "upstream": "4.0.5",
   "generatedBy": "tools/charaxis/generate.js",
   "cases": {
-    "total": 150,
+    "total": 172,
     "threw": 6,
     "byAxis": {
       "utf16-code-units": 34,
       "js-dot-exclusions": 24,
       "case-folding": 32,
       "maxlength-units": 14,
-      "fastpaths": 24,
+      "fastpaths-top": 24,
+      "fastpaths-inline": 22,
       "dot-guard-lexical": 22
     },
     "platforms": [
@@ -44,10 +45,16 @@
       "note": "The cap counts UTF-16 units. Go len() counts bytes and len([]rune()) counts code points; for an astral string all three differ."
     },
     {
-      "axis": "fastpaths",
-      "kills": "no-fastpaths",
+      "axis": "fastpaths-top",
+      "kills": "no-top-fastpaths",
       "probes": 12,
-      "note": "The inline fast path changes the compiled output, not just the route to it: it adds trailing-slash leniency the full scanner does not emit."
+      "note": "parse.fastpaths() (lib/parse.js:1330) changes the compiled output, not just the route to it: it appends a trailing-slash allowance unless strictSlashes. Every probe here starts \".\" or \"*\", which is what makeRe gates the call on."
+    },
+    {
+      "axis": "fastpaths-inline",
+      "kills": "no-inline-fastpath",
+      "probes": 11,
+      "note": "The inline fast path (lib/parse.js:606) returns before the scanner runs and is the STRICTER of the two paths: the scanner appends a trailing-slash allowance it omits."
     },
     {
       "axis": "dot-guard-lexical",

@@ -126,6 +126,41 @@ watched as it climbs. To make it a gate:
 PICOMATCH_PARITY_MIN=95 make conformance
 ```
 
+### A gate that moves before parity can
+
+Parity replays behaviour — pattern in, boolean out — so it cannot move until the
+scanner, the emitter *and* the matcher all work. For the whole time the parser is
+being written it reads 0% and says nothing about progress.
+
+So the parser has its own number. `testdata/tokens/` records the token stream
+upstream's parser produces for each of 1,491 patterns, and `make tokens` replays
+them against `internal/parse`. It is available from the first token the scanner
+emits, and it localises a failure to the layer that caused it:
+
+```
+tokens differ                     -> parser bug
+tokens match, behaviour differs   -> emitter or matcher bug
+```
+
+```bash
+make tokens           # report only
+make tokens-fixture   # re-record from upstream (needs Node)
+```
+
+Each record carries which of picomatch's three parsers `makeRe` would really have
+used, **measured rather than transcribed** — the inline fast path's condition
+(`parse.js:606`) tests the input *after* `removePrefix` rewrote it, so `./foo`
+reads as ineligible while the scanner actually fast-paths it. Of 1,491 patterns,
+1,316 take the full scanner, 25 take `parse.fastpaths()` and 150 the inline path;
+67 compile to different source. For those 67, matching the tokens does not
+settle what `makeRe` produced, so the gate reports that subset separately instead
+of dropping it.
+
+This is reported separately from parity and never folded into it — the pattern
+list is inherited from upstream's suite rather than chosen, and the records are
+internal state that [DECISIONS.md](DECISIONS.md) §6 excludes from the headline
+figure on purpose.
+
 ### What the fixtures cannot see
 
 A parity percentage says how much recorded behaviour a port reproduces. It never
@@ -134,11 +169,11 @@ mutation to upstream, replays every fixture against the mutant, and counts how
 many detect it. A mutation nothing detects is behaviour a port could get wrong
 while every number here still read clean.
 
-Five plausible Go-port choices survive all 18,792 comparable fixtures — walking
-by rune instead of UTF-16 code unit, `nocase` via Unicode folding, a globstar
-body that crosses newlines, `maxLength` counted in code points, and skipping the
-inline fastpaths. Two controls are detected by 29 and 34 fixtures, so the
-instrument is not dead.
+Six plausible Go-port choices survive all 18,792 comparable fixtures — walking by
+rune instead of UTF-16 code unit, `nocase` via Unicode folding, a globstar body
+that crosses newlines, `maxLength` counted in code points, and skipping either of
+picomatch's two fast paths. Two controls are detected by 29 and 34 fixtures, so
+the instrument is not dead.
 
 The cause is not weak testing upstream. The suite is exhaustive *structurally*
 and thin *alphabetically*: **91 distinct code points** across every pattern and
@@ -148,7 +183,13 @@ contain an astral character or a newline.
 So there is a second fixture set, `testdata/charaxis`, covering exactly those
 holes — generated the same honest way, by recording what picomatch does, and
 reported separately so the headline parity number stays derived purely from
-upstream's own tests. `make mutate` verifies it kills all five on every run.
+upstream's own tests. `make mutate` verifies it kills all six on every run.
+
+The sixth hole was found by *splitting* a mutation rather than adding one. A
+single entry named `no-fastpaths` described picomatch's inline fast path while
+its edit disabled the top-level one, so the inline site had never been measured
+and the top path's kills made the pair read as covered. Split apart, it came back
+0/0.
 
 ```bash
 make mutate      # measure both fixture sets
@@ -206,15 +247,21 @@ gets a field marked as unexercised (`contains`, `fastpaths`, `literalBrackets`,
 | ----------------------- | -------------------------------------------------------------- |
 | `picomatch.go`          | Public API (declared, not yet implemented)                       |
 | `options.go`            | `Options`, derived from the observed option surface              |
+| `internal/parse/`       | The scanner: pattern in, token stream out (declared, not built)  |
 | `internal/testcase/`    | Fixture loader and decoder for the recorded value encoding       |
+| `internal/tokencase/`   | Fixture loader for the recorded token streams                    |
 | `conformance_test.go`   | Parity harness, behind the `conformance` build tag               |
+| `tokens_test.go`        | Token gate — the parser's own pass/fail number                   |
 | `fixtures_test.go`      | Guards the extraction pipeline's output                          |
 | `tests/original/`       | Upstream picomatch v4.0.5, unmodified and hash-pinned            |
 | `testdata/original/`    | Recorded behaviours + extraction summary                         |
 | `testdata/charaxis/`    | Supplementary character-domain fixtures                          |
+| `testdata/tokens/`      | Golden token streams recorded from upstream's parser             |
 | `tools/extract/`        | The recorder (Node; build-time only)                             |
 | `tools/mutate/`         | Measures what each fixture set can detect                        |
 | `tools/charaxis/`       | Generates the character-domain fixtures                          |
+| `tools/tokens/`         | Generates the golden token streams                               |
+| `tools/probes/`         | Diagnostics: which parser ran, which rule decided it             |
 | `DECISIONS.md`          | Every non-trivial divergence from the original, with rationale   |
 
 ## No source-language runtime

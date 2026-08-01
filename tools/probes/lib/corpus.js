@@ -74,8 +74,71 @@ const patterns = (recs = records().filter(r => r.portable)) =>
 const portableWithPattern = () =>
   records().filter(r => r.portable && patternOf(r) !== null);
 
+/**
+ * Which of picomatch's three parsers `makeRe` actually used, under DEFAULT
+ * options. One of 'top' | 'inline' | 'none'.
+ *
+ *   'top'    parse.fastpaths() returned output, so parse() never ran.
+ *            ELIGIBILITY IS NOT USE: picomatch.js:311-317 calls fastpaths for
+ *            every pattern starting '.' or '*' but falls through to the full
+ *            scanner whenever the result is falsy. On this corpus 382 patterns
+ *            are eligible and 25 actually take it.
+ *   'inline' parse() returned from the fast path at parse.js:606, before the
+ *            scanner loop. Observable because `index` is still its initial -1;
+ *            that block's two `return state` sites are the only exits from
+ *            parse() that skip advance().
+ *   'none'   the full scanner ran.
+ *
+ * MEASURED, NOT TRANSCRIBED, and that is not pedantry: the condition at :606
+ * tests `input` after `utils.removePrefix` rewrote it at :430, so './foo'
+ * contains a '/' and looks ineligible while the scanner actually sees 'foo' and
+ * takes the fast path. Five corpus patterns differ between the two readings.
+ */
+const fastpathOf = p => {
+  const parse = parseModule();
+  try { if (parse.fastpaths(p, {})) return 'top'; } catch (e) { /* fall through, as makeRe does */ }
+  try { if (parse(p, {}).index === -1) return 'inline'; } catch (e) { /* unparseable: not a fast path */ }
+  return 'none';
+};
+
+/**
+ * Whether the path taken produced different regex source than the full scanner
+ * would have.
+ *
+ * Compared via makeRe(p, opts, returnOutput=true), which is state.output before
+ * compileRe wraps it — comparing the compiled `.source` instead double-counts,
+ * because compileRe adds another ^(?:...)$ layer.
+ *
+ * THE INLINE SIDE MUST BE UNWRAPPED FIRST, and an earlier revision of this
+ * function did not do it. The inline fast path calls `utils.wrapOutput` inside
+ * parse() (lib/parse.js:653), so its state.output is ALREADY `^(?:X)$` while the
+ * scanner's is a bare `X` that compileRe anchors later. Comparing them raw marks
+ * every inline pattern divergent no matter what it produced: it reported 172
+ * patterns, of which 105 are byte-identical once unwrapped. `.dotfile` compiled
+ * to `^(?:\.dotfile)$` against `\.dotfile` and was scored a divergence.
+ *
+ * The corrected count is 34. Note the leniency runs BOTH ways — the top fast
+ * path adds `\/?` on 5 patterns, and the scanner adds it on 28 the inline path
+ * leaves strict — so "the fast paths are more lenient" is not a safe shorthand.
+ */
+const fastpathDiverges = p => {
+  const pm = upstream();
+  const unwrap = s => {
+    const m = /^\^\(\?:([\s\S]*)\)\$$/.exec(s);
+    return m ? m[1] : s;
+  };
+  try {
+    const fast = pm.makeRe(p, {}, true);
+    const slow = pm.makeRe(p, { fastpaths: false }, true);
+    return (fastpathOf(p) === 'inline' ? unwrap(fast) : fast) !== slow;
+  } catch (e) {
+    return false;
+  }
+};
+
 module.exports = {
   ROOT, UPSTREAM_DIR, PARSE_JS, CASES,
   upstream, parseModule,
   records, patternOf, verdictOf, patterns, portableWithPattern,
+  fastpathOf, fastpathDiverges,
 };

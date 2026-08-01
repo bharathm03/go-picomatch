@@ -105,16 +105,39 @@ const AXES = [
     ]
   },
   {
-    axis: 'fastpaths',
-    kills: 'no-fastpaths',
-    note: 'The inline fast path changes the compiled output, not just the route to it: ' +
-          'it adds trailing-slash leniency the full scanner does not emit.',
+    axis: 'fastpaths-top',
+    kills: 'no-top-fastpaths',
+    note: 'parse.fastpaths() (lib/parse.js:1330) changes the compiled output, not just the ' +
+          'route to it: it appends a trailing-slash allowance unless strictSlashes. Every probe ' +
+          'here starts "." or "*", which is what makeRe gates the call on.',
     probes: [
       ['*.js', 'a.js/'], ['*.js', 'a.js'], ['.*', '.x/'], ['.*', '.x'],
       ['*', 'a/'], ['*', 'a'], ['*.js', 'a.js//'],
       ['*.js', 'a.js/', { strictSlashes: true }],
       ['.*', '.x/', { strictSlashes: true }],
       ['*a', 'ba/'], ['*', '.x'], ['.*', '.']
+    ]
+  },
+  {
+    axis: 'fastpaths-inline',
+    kills: 'no-inline-fastpath',
+    // This axis exists because splitting the old single `no-fastpaths` mutation
+    // in two revealed that nothing watched this site. The old mutation was named
+    // for the inline path but edited the top-level one, so the probes above were
+    // credited with covering a site they never touch.
+    //
+    // The leniency runs the OTHER way here, which is why probes written for the
+    // top path do not transfer: on 28 corpus patterns the full scanner appends
+    // the trailing-slash allowance and this fast path does not, so skipping it
+    // makes a port more permissive. Every pattern below is inline-eligible and
+    // NOT top-eligible (no leading "." or "*"), so it isolates this site.
+    note: 'The inline fast path (lib/parse.js:606) returns before the scanner runs and is the ' +
+          'STRICTER of the two paths: the scanner appends a trailing-slash allowance it omits.',
+    probes: [
+      ['a*', 'aa/'], ['a*', 'aa'], ['a*', 'aa/', { strictSlashes: true }],
+      ['?*', 'ab/'], ['?*', 'ab'], ['?*', 'a/'],
+      ['$*', '$a/'], ['$*', '$a'],
+      ['-*-', '-a-/'], ['a.js', 'a.js'], ['a.js', 'a.js/']
     ]
   },
   {

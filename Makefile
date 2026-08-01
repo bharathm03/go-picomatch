@@ -57,6 +57,12 @@ cover:
 conformance:
 	$(GO) test -tags conformance -run 'TestConformance|TestCharacterAxis' -v $(PKG)
 
+## tokens: report parser parity against the recorded token streams — moves long
+## before conformance can. PICOMATCH_TOKENS_MIN=95 gates it. No Node needed.
+.PHONY: tokens
+tokens:
+	$(GO) test -tags conformance -run 'TestToken' -v $(PKG)
+
 # --- Test-extraction pipeline (needs Node; not required to build or test) ----
 
 ## deps: install the extractor's Node dependencies
@@ -83,6 +89,11 @@ extract: verify-original
 .PHONY: charaxis
 charaxis: verify-original
 	node tools/charaxis/generate.js
+
+## tokens-fixture: re-record testdata/tokens from upstream's parser (rare)
+.PHONY: tokens-fixture
+tokens-fixture: verify-original
+	node tools/tokens/generate.js
 
 ## mutate: measure what the fixture sets can detect (see tools/mutate/README.md)
 .PHONY: mutate

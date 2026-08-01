@@ -21,9 +21,22 @@
 // `parse(pattern, { ...options, fastpaths: false })` (lib/picomatch.js:212), so
 // it always takes the full scanner. `makeRe` does not -- see
 // tools/probes/fastpath-diff.js. For a fastpath-eligible pattern the token
-// stream describes a code path that did not run. Any tokens.jsonl this writes
-// must carry a fastpath flag per pattern or it asserts the wrong oracle for a
-// few hundred of them.
+// stream describes a code path that did not run.
+//
+// So every record carries `fastpath` ('none' | 'top' | 'inline') and
+// `fastpathDiverges`. Those do NOT invalidate the token assertion -- a Go
+// full-scanner parser is right to produce these tokens either way. What they say
+// is how much a green token score BUYS: where a fastpath ran and diverged, the
+// tokens no longer determine what makeRe compiled, and the pattern needs the
+// fastpath pass before its behaviour is pinned. Consumers should stratify on it,
+// not filter by it.
+//
+// BOTH FLAGS ARE MEASURED, NOT TRANSCRIBED, and the difference is load-bearing.
+// The inline condition at parse.js:606 tests `input` AFTER
+// `utils.removePrefix` rewrote it at :430, so the obvious transcription
+// disagrees with reality: './foo' contains a '/' and looks ineligible, but the
+// scanner sees 'foo' and takes the fast path. The transcription is kept below
+// only as a cross-check, and the run reports any disagreement.
 
 const fs = require('fs');
 const path = require('path');
@@ -37,13 +50,27 @@ const strip = t => {
   return o;
 };
 
+// Which parser makeRe really used, and whether it agreed with the scanner. Both
+// live in lib/corpus.js because tools/tokens/generate.js writes the same two
+// flags into the committed fixture, and a second copy here could drift from the
+// one the Go gate is stratified by.
+const { fastpathOf, fastpathDiverges: divergesFrom } = corpus;
+
+// Kept only to check the flag above. If this ever agrees completely, the
+// removePrefix interaction has gone away and the note in the header is stale.
+const transcribedInline = p => !/(^[*!]|[/()[\]{}"])/.test(p);
+
 // ---- single-pattern mode -------------------------------------------------
 const one = process.argv[2];
 if (one) {
   const st = parse(one, { fastpaths: false });
+  const fp = fastpathOf(one);
   console.log('pattern  %j', one);
   console.log('consumed %j        <- note any slash the scanner invented', st.consumed);
   console.log('output   %j', st.output);
+  console.log('fastpath %s%s', fp, fp === 'none' ? '   <- these tokens are what makeRe compiled'
+    : divergesFrom(one) ? '   <- and it DIVERGES; these tokens are not what makeRe compiled'
+      : '   <- but it agrees with the scanner here');
   console.log('');
   for (const [i, t] of st.tokens.entries()) {
     console.log('  %s %s %s', String(i).padStart(3), t.type.padEnd(12), JSON.stringify(strip(t)));
@@ -59,6 +86,8 @@ const fields = new Map();
 const out = [];
 let nTok = 0, nPat = 0, threw = 0;
 let backtrack = 0, risky = 0, hasDoubleStar = 0, keptGlobstar = 0, demoted = 0;
+const fpCount = { none: 0, top: 0, inline: 0 };
+let fpDiverges = 0, transcriptionDisagrees = [];
 
 for (const p of pats) {
   let st;
@@ -108,10 +137,18 @@ for (const p of pats) {
     if (st.tokens.some(t => t.type === 'globstar')) keptGlobstar++; else demoted++;
   }
 
+  // Which parser makeRe really used, and whether it agreed. See the header.
+  const fastpath = fastpathOf(p);
+  const diverges = fastpath !== 'none' && divergesFrom(p);
+  fpCount[fastpath]++;
+  if (diverges) fpDiverges++;
+  if ((fastpath === 'inline') !== transcribedInline(p)) transcriptionDisagrees.push(p);
+
   if (process.env.OUT) {
     out.push(JSON.stringify({
       pattern: p, consumed: st.consumed, output: st.output,
       negated: st.negated, backtrack: st.backtrack,
+      fastpath, fastpathDiverges: diverges,
       tokens: st.tokens.map(strip)
     }));
   }
@@ -144,6 +181,22 @@ console.log('state.backtrack set -- output discarded and rebuilt from tokens');
 console.log('  (parse.js:1309, set at :561 :731 :922 :1133) : %d patterns', backtrack);
 console.log('  of those, the risky-extglob rewrite          : %d patterns', risky);
 console.log('    isolated by maxExtglobRecursion:false changing the output');
+console.log('');
+console.log('--- which parser did makeRe actually use? --------------------------');
+console.log('full scanner ("none") -- tokens ARE what makeRe compiled : %d', fpCount.none);
+console.log('parse.fastpaths()     ("top")                            : %d', fpCount.top);
+console.log('inline fastpath       ("inline", parse.js:606)           : %d', fpCount.inline);
+console.log('  of the fastpath patterns, source differs from scanner  : %d', fpDiverges);
+console.log('');
+console.log('A green token score over the %d divergent patterns does not pin what', fpDiverges);
+console.log('makeRe compiled -- only what the scanner would have. Stratify, do not filter.');
+console.log('');
+console.log('transcribed-vs-measured inline flag disagrees on         : %d patterns', transcriptionDisagrees.length);
+if (transcriptionDisagrees.length) {
+  console.log('  %s', transcriptionDisagrees.slice(0, 6).map(p => JSON.stringify(p)).join(' '));
+  console.log('    expected: parse.js:606 tests the input AFTER removePrefix (:430),');
+  console.log('    so a leading "./" is stripped before the /()[]{}" test runs.');
+}
 console.log('');
 console.log('patterns containing "**"                       : %d', hasDoubleStar);
 console.log('  globstar token emitted                       : %d', keptGlobstar);

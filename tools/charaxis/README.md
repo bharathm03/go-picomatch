@@ -8,7 +8,7 @@ make charaxis        # regenerate testdata/charaxis/
 
 `testdata/original` is recorded from picomatch's own unmodified suite. That is
 what makes the parity number worth quoting — nobody chose its contents — and it
-is also its ceiling. `tools/mutate/run.js` measured that ceiling: five plausible
+is also its ceiling. `tools/mutate/run.js` measured that ceiling: six plausible
 Go-port mistakes survive all 18,792 comparable fixtures.
 
 The suite explores 91 distinct code points, U+0009 to U+30EB, four of them
@@ -30,7 +30,8 @@ that matters: that **no** mutation escapes every fixture set.
 | `js-dot-exclusions` | `globstar-crosses-newline` | JS `.` excludes exactly `\n \r U+2028 U+2029` |
 | `case-folding` | `unicode-case-folding` | JS non-unicode `Canonicalize` will not fold U+212A onto `k` |
 | `maxlength-units` | `maxlength-in-code-points` | the cap counts UTF-16 units, not bytes or runes |
-| `fastpaths` | `no-fastpaths` | the inline path adds trailing-slash leniency |
+| `fastpaths-top` | `no-top-fastpaths` | `parse.fastpaths()` appends a trailing-slash allowance |
+| `fastpaths-inline` | `no-inline-fastpath` | the inline path is the *stricter* one — the scanner appends the allowance it omits |
 | `dot-guard-lexical` | *(none)* | the dot guard comes from the pattern's left neighbour, not the match position |
 
 `dot-guard-lexical` kills no mutation because upstream does cover it — with
