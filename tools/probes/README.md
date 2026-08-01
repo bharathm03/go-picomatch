@@ -235,6 +235,27 @@ coverage cannot discriminate data differences. Both conclusions were artifacts
 of trap 2. **Treat any coverage result produced without process isolation as
 void.**
 
+### `build-order.js` — which branch to write next
+
+```bash
+make build-order
+```
+
+The only probe here that measures the *port* rather than upstream. `make tokens`
+reports which construct each failing pattern tripped on **first**, which is the
+wrong number to plan with: a pattern blocked on `*` may hold a bracket too, so
+building `*` does not win it. This asks how many patterns would parse end to end
+once a branch exists and nothing else changes — for `*` those two numbers are
+696 and **524**.
+
+It works from the recorded token types rather than from a guess about what a
+branch emits, so it is exact for the corpus and an upper bound for the branch.
+Keep its `BUILT` list in step with the scanner: a type listed there that the
+scanner cannot actually push inflates every number it prints.
+
+`docs/build-order.md` is the staged plan derived from it, and goes stale as
+branches land — re-run this rather than trusting that file.
+
 ## Limits worth knowing before you trust a number
 
 - **Eligibility is not use, and an earlier revision of this file conflated

@@ -200,6 +200,10 @@ backtracking AST walker. DECISIONS.md §1.
 
 ## Where to look before deciding something
 
+- `docs/build-order.md` — which branch to write next, staged, with the upstream
+  sites and the gate figure each stage must reach. Derived from
+  `make build-order`; re-run that rather than trusting the file, which goes stale
+  as branches land.
 - `DECISIONS.md` — every deliberate divergence from upstream, with a re-check
   command for each. Add an entry rather than a code comment when the port will not
   match upstream.

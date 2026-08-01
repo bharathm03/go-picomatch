@@ -109,6 +109,11 @@ probes: verify-original
 	node tools/probes/token-inventory.js
 	node tools/probes/fingerprint.js
 
+## build-order: what each unbuilt branch would unblock, from the recorded tokens
+.PHONY: build-order
+build-order:
+	node tools/probes/build-order.js
+
 ## probes-data: write the probe artifacts to testdata/probes/ (gitignored)
 .PHONY: probes-data
 probes-data: verify-original
