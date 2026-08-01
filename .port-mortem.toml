@@ -1,0 +1,48 @@
+# Port Mortem 2026 — submission metadata.
+
+[submission]
+track = "F"                                  # JavaScript -> Go
+name = "go-picomatch"
+repo = "https://github.com/bharathm03/go-picomatch"
+
+[source]
+repo = "https://github.com/micromatch/picomatch"
+language = "JavaScript"
+version = "4.0.5"
+commit = "4f41a8edade7a5ab19832f7b40ecce46b288767f"
+license = "MIT"
+# Source lines under lib/ plus the two entry points, excluding tests.
+source_lines = 2018
+
+[target]
+language = "Go"
+module = "github.com/bharathm03/go-picomatch"
+go_version = "1.26"
+# The port depends on the Go standard library only.
+dependencies = 0
+
+[tests]
+# The upstream Mocha suite, vendored byte-for-byte and hash-pinned.
+original_suite = "tests/original/test"
+manifest = "tests/original/MANIFEST.json"
+# Top-level files under tests/original/test that mocha runs; test/support/ holds
+# helpers, not specs.
+spec_files = 36
+upstream_tests = 1977
+# `node tools/extract/verify.js` re-hashes the tree; CI runs it on every push.
+verify_command = "make verify-original"
+
+[parity]
+# Behaviour recorded from the unmodified upstream suite and replayed against Go.
+fixtures = "testdata/original/cases.jsonl"
+report_command = "make conformance"
+
+[build]
+command = "make build"
+docker = "docker build -t go-picomatch ."
+
+[escape_hatches]
+# Go's equivalent of `unsafe` blocks, plus `any` in non-generic positions.
+# Counted in DECISIONS.md; the port itself targets zero unsafe.
+unsafe_imports = 0
+cgo = false

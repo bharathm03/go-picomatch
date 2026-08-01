@@ -1,0 +1,19 @@
+{
+  "name": "go-picomatch-extract",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline test-extraction pipeline: records picomatch's observable behaviour while its own unmodified Mocha suite runs, and emits language-neutral fixtures for the Go port.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "vendor": "node vendor.js",
+    "verify": "node verify.js",
+    "extract": "node extract.js"
+  },
+  "devDependencies": {
+    "fill-range": "^7.1.1",
+    "mocha": "^10.4.0"
+  }
+}

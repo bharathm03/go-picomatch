@@ -1,0 +1,38 @@
+go-picomatch
+============
+
+A Go port of picomatch, produced for Port Mortem 2026 (Track F, JavaScript -> Go).
+
+This product includes software developed by Jon Schlinkert and the micromatch
+contributors.
+
+
+Upstream work
+-------------
+
+  picomatch v4.0.5
+  https://github.com/micromatch/picomatch
+  commit 4f41a8edade7a5ab19832f7b40ecce46b288767f
+  Copyright (c) 2017-present, Jon Schlinkert
+  Licensed under the MIT License.
+
+The upstream project is vendored under `tests/original/`, byte-for-byte
+unmodified, together with its own test suite. Its licence is preserved at
+`tests/original/LICENSE`, and every vendored file is hashed in
+`tests/original/MANIFEST.json`.
+
+The vendored JavaScript exists for two build-time purposes only:
+
+  1. Recording picomatch's observable behaviour while its own unmodified test
+     suite runs, which produces the fixtures in `testdata/original/`.
+  2. Differential testing of the Go port against the original.
+
+It is never executed by, linked into, or shelled out to by the Go package. The
+Go package imports nothing outside the standard library.
+
+
+Port
+----
+
+  Copyright (c) 2026 Bharath Mohan
+  Licensed under the MIT License. See LICENSE.

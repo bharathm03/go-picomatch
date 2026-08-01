@@ -1,0 +1,18 @@
+# Line endings are part of this repo's integrity claim, not a local preference.
+#
+# Default: normalise text to LF in the repository.
+* text=auto eol=lf
+
+# The vendored upstream suite is hashed byte-for-byte in
+# tests/original/MANIFEST.json, and tools/extract/lib/hashes.js deliberately does
+# not normalise line endings — a CRLF conversion is exactly the silent edit the
+# manifest exists to catch.
+#
+# Without this rule, Git for Windows' default core.autocrlf=true rewrites every
+# line ending on checkout, so a fresh clone on Windows fails `make verify-original`
+# on all 47 files while nothing has actually been modified. Pin the bytes.
+tests/original/** -text
+
+# The recorded fixtures back the parity claim and are quoted by byte size; keep
+# them byte-identical across platforms for the same reason.
+testdata/original/** -text

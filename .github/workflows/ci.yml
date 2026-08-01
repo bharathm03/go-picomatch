@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # picomatch's path semantics differ by platform, so the port is tested on
+        # both rather than on Linux alone.
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags conformance ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test (race detector)
+        # -race needs cgo, which is not reliably available on the Windows runner.
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./...
+
+      - name: Conformance report
+        # Reports the parity rate without gating on it; the number is expected to
+        # climb from zero as the port lands.
+        run: go test -tags conformance -run TestConformance -v ./...
+
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.os == 'ubuntu-latest'
+        with:
+          name: conformance-report
+          path: conformance-report.json
+          if-no-files-found: warn
+
+  upstream-integrity:
+    name: Upstream suite unmodified
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The core honesty check: tests/original must match the hashes pinned when
+      # it was vendored. An edit to the upstream suite fails the build instead of
+      # quietly inflating the parity number.
+      - name: Verify upstream test-suite hashes
+        run: node tools/extract/verify.js

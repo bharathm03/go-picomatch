@@ -1,0 +1,13 @@
+# Never ship the host's install tree into the image; the Dockerfile installs its
+# own. Copying it in would also mask a broken `npm install`.
+**/node_modules
+
+.git
+.github
+
+# Generated locally, regenerated in the image.
+conformance-report.json
+coverage.out
+coverage.*
+*.test
+*.exe
