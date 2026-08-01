@@ -186,8 +186,8 @@ func replayMatcher(c *testcase.Case, args []any, want any) (status, string) {
 	}
 
 	p, err := picomatch.New(glob, opts)
-	if err != nil {
-		return expectError(c, err)
+	if err != nil || c.Error != nil {
+		return compareError(c, err)
 	}
 
 	// `matcher(input, true)` returns a detail object rather than a bool.
@@ -210,12 +210,11 @@ func replayMatcher(c *testcase.Case, args []any, want any) (status, string) {
 		// upstream's own name for `options.windows` (lib/picomatch.js: `const
 		// posix = opts.windows`), so it maps onto Result.Windows — leaving it
 		// uncompared would let a port that ignores platform semantics entirely
-		// pass every matcher case. `regex` and `match` stay out: ECMAScript
-		// regex source is an implementation detail this port does not reproduce.
+		// pass every matcher case.
 		return compareFields(detail, map[string]any{
 			"glob": res.Glob, "input": res.Input, "output": res.Output,
 			"posix": res.Windows,
-		})
+		}, matcherFieldsNotCompared)
 	}
 
 	return compareBool(c, want, p.Match(input), nil)
@@ -231,15 +230,13 @@ func replayScan(c *testcase.Case, args []any, want any) (status, string) {
 		return statusUnsupported, "unmapped option"
 	}
 
-	got, err := picomatch.Scan(input, opts)
-	if err != nil {
-		return expectError(c, err)
-	}
 	// A recorded throw the port did not reproduce is a divergence, not an
 	// inexpressible case; scoring it unsupported would drop it from the parity
-	// denominator instead of counting it against us.
-	if c.Error != nil {
-		return statusFailed, fmt.Sprintf("want error %q, got none", c.Error.Message)
+	// denominator instead of counting it against us. compareError covers both
+	// directions, so the two conditions are handled together.
+	got, err := picomatch.Scan(input, opts)
+	if err != nil || c.Error != nil {
+		return compareError(c, err)
 	}
 
 	fields, ok := want.(map[string]any)
@@ -247,10 +244,11 @@ func replayScan(c *testcase.Case, args []any, want any) (status, string) {
 		return statusUnsupported, "unexpected scan result shape"
 	}
 
-	// Every key the fixture recorded is compared. `start`, `slashes` and `parts`
-	// are recorded on every scan result (see summary.json resultShapes) and are
-	// part of the contract: a port that reports the wrong offset, or drops the
-	// segment list under Options.Parts, must not score a clean pass here.
+	// Every key the fixture recorded is compared; nothing about a scan result is
+	// exempt, so the exclusion set is empty. `start`, `slashes` and `parts` are
+	// recorded on every scan result (see summary.json resultShapes) and are part
+	// of the contract: a port that reports the wrong offset, or drops the segment
+	// list under Options.Parts, must not score a clean pass here.
 	return compareFields(fields, map[string]any{
 		"base": got.Base, "glob": got.Glob, "prefix": got.Prefix, "input": got.Input,
 		"start":  got.Start,
@@ -258,33 +256,56 @@ func replayScan(c *testcase.Case, args []any, want any) (status, string) {
 		"isGlobstar": got.IsGlobstar, "isExtglob": got.IsExtglob,
 		"negated": got.Negated, "negatedExtglob": got.NegatedExtglob,
 		"parts": got.Parts, "slashes": got.Slashes,
-	})
+	}, nil)
 }
 
-// compareFields checks every field the fixture recorded against the port's value,
-// skipping keys the recording does not carry.
+// matcherFieldsNotCompared lists the recorded matcher keys compareFields does
+// not check, each with the reason it is exempt.
 //
-// Keys absent from `actual` are a harness gap rather than a divergence, so they
-// are reported unsupported: silently ignoring them is how an unchecked field ends
-// up counted as parity.
-func compareFields(recorded map[string]any, actual map[string]any) (status, string) {
-	names := make([]string, 0, len(actual))
-	for name := range actual {
+// It exists so that the exemptions are declared rather than implied. Any other
+// recorded key that the harness fails to supply a value for is reported
+// unsupported instead of being skipped in silence.
+var matcherFieldsNotCompared = map[string]string{
+	"isMatch": "compared directly in replayMatcher, before this call",
+	"match":   "ECMAScript match object; not reproduced by this port",
+	"regex":   "ECMAScript regex source; not reproduced by this port",
+}
+
+// compareFields checks every field the fixture recorded against the port's value.
+//
+// It iterates the recording, not the port's own map, and that direction is the
+// whole safety property: a key upstream recorded but the harness forgot to
+// supply is a harness gap, and is reported unsupported so it leaves the parity
+// numerator and denominator both. Iterating the port's map instead would make
+// such a key invisible — add a field to ScanResult, forget to list it here, and
+// parity would keep reporting a clean pass over a field nobody compares.
+//
+// Keys the recording does not carry are simply absent from the loop, which is
+// how the two recorded scan shapes (with and without `parts`/`slashes`) are
+// handled without a special case.
+func compareFields(recorded map[string]any, actual map[string]any, notCompared map[string]string) (status, string) {
+	names := make([]string, 0, len(recorded))
+	for name := range recorded {
 		names = append(names, name)
 	}
 	sort.Strings(names) // deterministic first-failure reporting
 
 	for _, name := range names {
-		expected, present := recorded[name]
-		if !present {
-			continue
+		got, supplied := actual[name]
+		if !supplied {
+			if _, exempt := notCompared[name]; exempt {
+				continue
+			}
+			return statusUnsupported, fmt.Sprintf("%s: recorded but not compared by the harness", name)
 		}
-		equal, comparable := sameValue(expected, actual[name])
+
+		expected := recorded[name]
+		equal, comparable := sameValue(expected, got)
 		if !comparable {
 			return statusUnsupported, fmt.Sprintf("%s: uncomparable recorded type %T", name, expected)
 		}
 		if !equal {
-			return statusFailed, fmt.Sprintf("%s: want %v, got %v", name, expected, actual[name])
+			return statusFailed, fmt.Sprintf("%s: want %v, got %v", name, expected, got)
 		}
 	}
 	return statusPassed, ""
@@ -335,17 +356,8 @@ func sameSlice[T any](want []any, got []T, eq func(any, T) bool) bool {
 
 // compareBool checks a boolean-returning call, honouring a recorded throw.
 func compareBool(c *testcase.Case, want any, got bool, err error) (status, string) {
-	if errors.Is(err, picomatch.ErrNotImplemented) {
-		return statusFailed, "not implemented"
-	}
-	if c.Error != nil {
-		if err == nil {
-			return statusFailed, fmt.Sprintf("want error %q, got none", c.Error.Message)
-		}
-		return statusPassed, ""
-	}
-	if err != nil {
-		return statusFailed, "unexpected error: " + err.Error()
+	if c.Error != nil || err != nil {
+		return compareError(c, err)
 	}
 
 	expected, ok := want.(bool)
@@ -358,23 +370,58 @@ func compareBool(c *testcase.Case, want any, got bool, err error) (status, strin
 	return statusPassed, ""
 }
 
-// expectError resolves a call that returned an error: correct if upstream threw
-// too, a failure otherwise.
+// compareError resolves a call where either side produced an error.
 //
-// ErrNotImplemented is neither, and is always a failure. It is this port's
-// placeholder, not a behavioural answer: matching it against a recorded throw
-// would score the absence of an implementation as behavioural equivalence, while
-// calling it unsupported would drop the case from the denominator entirely and
-// report a flattering percentage over the handful of cases left. A missing
-// implementation is precisely a failure to reproduce upstream's behaviour.
-func expectError(c *testcase.Case, err error) (status, string) {
+// A recorded throw is only reproduced if the port raises the *same* exception:
+// same JavaScript constructor name, same message. Accepting any error for any
+// recorded throw would score "Missing closing: )" as equivalent to "exceeds
+// maximum allowed length", and would let a port pass the throw cases by failing
+// for entirely unrelated reasons. The fixtures carry name and message — 22 cases
+// across 8 distinct messages — so the comparison costs nothing but the code to
+// do it.
+//
+// ErrNotImplemented is never a match. It is this port's placeholder, not a
+// behavioural answer: matching it against a recorded throw would score the
+// absence of an implementation as behavioural equivalence, while calling it
+// unsupported would drop the case from the denominator entirely and report a
+// flattering percentage over the handful of cases left. A missing implementation
+// is precisely a failure to reproduce upstream's behaviour.
+func compareError(c *testcase.Case, err error) (status, string) {
 	if errors.Is(err, picomatch.ErrNotImplemented) {
 		return statusFailed, "not implemented"
 	}
-	if c.Error != nil {
-		return statusPassed, ""
+	if c.Error == nil {
+		return statusFailed, "unexpected error: " + err.Error()
 	}
-	return statusFailed, "unexpected error: " + err.Error()
+	if err == nil {
+		return statusFailed, fmt.Sprintf("want %s %q, got no error", c.Error.Name, c.Error.Message)
+	}
+
+	// An error the port cannot describe in upstream's terms cannot be shown to be
+	// upstream's error, so it does not count as one.
+	var e *picomatch.Error
+	if !errors.As(err, &e) {
+		return statusFailed, fmt.Sprintf("want %s %q, got untyped error %q",
+			c.Error.Name, c.Error.Message, err.Error())
+	}
+	if e.Name != c.Error.Name || e.Message != c.Error.Message {
+		return statusFailed, fmt.Sprintf("want %s %q, got %s %q",
+			c.Error.Name, c.Error.Message, e.Name, e.Message)
+	}
+	return statusPassed, ""
+}
+
+// inertOptions are keys the upstream suite passes that upstream itself never
+// reads, verified by grepping every `opts.X` / `options.X` in tests/original/lib
+// and the two entry points.
+//
+// `relaxSlashes` appears once, in test/slashes-posix.js, and is read nowhere:
+// `makeRe("*")` and `makeRe("*", {relaxSlashes: true})` compile to identical
+// sources and match identically. Listing it here rather than giving
+// picomatch.Options a field for it keeps the Go API from promising behaviour
+// upstream does not have.
+var inertOptions = map[string]string{
+	"relaxSlashes": "passed by test/slashes-posix.js; read nowhere in upstream lib",
 }
 
 // buildOptions maps a recorded options object onto [picomatch.Options].
@@ -392,20 +439,28 @@ func buildOptions(args []any, index int, c *testcase.Case) (*picomatch.Options, 
 
 	boolFields := map[string]*bool{
 		"windows": &opts.Windows, "bash": &opts.Bash, "dot": &opts.Dot,
-		"strictSlashes": &opts.StrictSlashes, "relaxSlashes": &opts.RelaxSlashes,
-		"posix": &opts.Posix, "regex": &opts.Regex, "basename": &opts.Basename,
+		"strictSlashes": &opts.StrictSlashes,
+		"posix":         &opts.Posix, "regex": &opts.Regex, "basename": &opts.Basename,
 		"matchBase": &opts.MatchBase, "nobrace": &opts.NoBrace,
 		"nobracket": &opts.NoBracket, "strictBrackets": &opts.StrictBrackets,
 		"noextglob": &opts.NoExtglob, "noext": &opts.NoExt,
 		"noglobstar": &opts.NoGlobstar, "nonegate": &opts.NoNegate,
 		"noparen": &opts.NoParen, "nocase": &opts.NoCase, "capture": &opts.Capture,
 		"contains": &opts.Contains, "unescape": &opts.Unescape,
-		"keepQuotes": &opts.KeepQuotes, "literal": &opts.Literal,
-		"scanToEnd": &opts.ScanToEnd, "parts": &opts.Parts,
+		"keepQuotes": &opts.KeepQuotes,
+		"scanToEnd":  &opts.ScanToEnd, "parts": &opts.Parts,
 	}
 
 	for key, value := range raw {
 		if testcase.IsAbsent(value) {
+			continue
+		}
+
+		// An option the suite passes but upstream never reads changes no
+		// behaviour, so it maps to no field. It is still recognised here: the
+		// alternative is to report the case unsupported and drop it from the
+		// denominator over a key that provably cannot affect the answer.
+		if _, inert := inertOptions[key]; inert {
 			continue
 		}
 
@@ -458,6 +513,61 @@ func buildOptions(args []any, index int, c *testcase.Case) (*picomatch.Options, 
 	}
 
 	return opts, true
+}
+
+// TestCompareFieldsRejectsUncomparedKeys pins the safety property compareFields
+// exists for.
+//
+// Until the matcher lands, every replay path errors before reaching
+// compareFields, so nothing at runtime would notice if it went back to iterating
+// the port's own map — and the regression it guards against is silent by
+// construction: an unchecked field reports as parity, not as a failure. This
+// test is what makes the property observable in the meantime.
+func TestCompareFieldsRejectsUncomparedKeys(t *testing.T) {
+	recorded := map[string]any{"base": "a", "glob": "*", "start": float64(0)}
+
+	t.Run("recorded key the harness does not supply", func(t *testing.T) {
+		got, detail := compareFields(recorded, map[string]any{"base": "a", "glob": "*"}, nil)
+		if got != statusUnsupported {
+			t.Fatalf("status = %v, want statusUnsupported (detail: %s)", got, detail)
+		}
+	})
+
+	t.Run("...unless it is declared exempt", func(t *testing.T) {
+		exempt := map[string]string{"start": "test"}
+		if got, detail := compareFields(recorded, map[string]any{"base": "a", "glob": "*"}, exempt); got != statusPassed {
+			t.Fatalf("status = %v, want statusPassed (detail: %s)", got, detail)
+		}
+	})
+
+	t.Run("keys absent from the recording are not required", func(t *testing.T) {
+		actual := map[string]any{"base": "a", "glob": "*", "start": 0, "parts": []string{"a"}}
+		if got, detail := compareFields(recorded, actual, nil); got != statusPassed {
+			t.Fatalf("status = %v, want statusPassed (detail: %s)", got, detail)
+		}
+	})
+
+	t.Run("a supplied key that differs still fails", func(t *testing.T) {
+		actual := map[string]any{"base": "b", "glob": "*", "start": 0}
+		if got, _ := compareFields(recorded, actual, nil); got != statusFailed {
+			t.Fatalf("status = %v, want statusFailed", got)
+		}
+	})
+}
+
+// TestMatcherExemptionsAreDeclared checks that the matcher exemption list still
+// describes the recorded shape, so a new key in the recording cannot be exempted
+// by accident.
+func TestMatcherExemptionsAreDeclared(t *testing.T) {
+	for _, key := range []string{"isMatch", "match", "regex"} {
+		if _, ok := matcherFieldsNotCompared[key]; !ok {
+			t.Errorf("%q is no longer declared exempt", key)
+		}
+	}
+	if len(matcherFieldsNotCompared) != 3 {
+		t.Errorf("exemption list has %d entries, want 3 — a new exemption needs a stated reason",
+			len(matcherFieldsNotCompared))
+	}
 }
 
 func parityFloor(t *testing.T) float64 {

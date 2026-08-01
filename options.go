@@ -2,11 +2,22 @@ package picomatch
 
 // Options controls pattern compilation and matching.
 //
-// The field set is derived from the extracted fixtures rather than transcribed
-// from upstream documentation: every option below is one the upstream Mocha suite
-// actually exercises. `tools/extract` reports the surface it observed in
-// testdata/original/summary.json under "optionSurface", so this struct can be
-// re-checked against the evidence rather than against memory.
+// The field set is reconciled between two independent sources of evidence, not
+// transcribed from upstream documentation:
+//
+//   - what the upstream Mocha suite passes in — `tools/extract` reports the 30
+//     keys it observed in testdata/original/summary.json under "optionSurface";
+//   - what upstream actually reads — every `opts.X` / `options.X` in
+//     tests/original/lib and the two entry points.
+//
+// The two sets differ, and the difference is the point. A key the suite passes
+// but upstream never reads is inert and gets no field here, however often it
+// appears: `relaxSlashes` is passed once, in test/slashes-posix.js, and read
+// nowhere — `makeRe("*")` and `makeRe("*", {relaxSlashes: true})` compile to
+// identical sources. A key upstream reads but the suite never passes is real and
+// does get a field, because the fixtures cannot vouch for behaviour they never
+// trigger: Contains, NoFastpaths, LiteralBrackets and Prepend are all in that
+// position, and are marked below.
 //
 // The zero value is the default configuration, matching picomatch's own
 // `options || {}`. Options is passed by pointer throughout; a nil *Options means
@@ -26,9 +37,6 @@ type Options struct {
 
 	// StrictSlashes disables the default leniency about trailing slashes.
 	StrictSlashes bool
-
-	// RelaxSlashes relaxes slash matching at segment boundaries.
-	RelaxSlashes bool
 
 	// Posix enables POSIX character classes such as [:alpha:].
 	Posix bool
@@ -76,6 +84,9 @@ type Options struct {
 	Capture bool
 
 	// Contains matches anywhere in the input instead of anchoring.
+	//
+	// Read by upstream (lib/picomatch.js, lib/parse.js) but never exercised by
+	// the suite: no fixture constrains it.
 	Contains bool
 
 	// Unescape strips backslash escapes from the pattern before compiling.
@@ -85,8 +96,32 @@ type Options struct {
 	// grouping.
 	KeepQuotes bool
 
-	// Literal treats the whole pattern as a literal string.
-	Literal bool
+	// NoFastpaths disables the inline fast paths upstream uses for patterns that
+	// begin with `.` or `*` and contain no other glob syntax.
+	//
+	// Upstream spells this `fastpaths`, defaulting to on (`opts.fastpaths !==
+	// false`). Inverting it here keeps the Go zero value equal to upstream's
+	// default; a `Fastpaths bool` would silently disable them instead.
+	//
+	// It is not cosmetic. The fast paths change the compiled output, not just the
+	// route to it — upstream's own parser disables them mid-parse at
+	// lib/parse.js:588 to work around a `**/!(*.d).ts` misparse. Read by upstream
+	// but never exercised by the suite.
+	NoFastpaths bool
+
+	// LiteralBrackets forces `[` and `]` to be treated as literals (true) or as a
+	// bracket expression (false).
+	//
+	// Upstream tests this three ways — `=== false` at lib/parse.js:856 and
+	// `=== true` at :865 — so unset is a third state distinct from either, and a
+	// plain bool could not express it. Read by upstream but never exercised by
+	// the suite.
+	LiteralBrackets *bool
+
+	// Prepend is emitted ahead of the compiled output (lib/parse.js:371).
+	//
+	// Read by upstream but never exercised by the suite.
+	Prepend string
 
 	// Flags are extra regular-expression flags applied to the compiled pattern.
 	Flags string

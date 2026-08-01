@@ -11,6 +11,17 @@
 // against are already in place — see testdata/original and the conformance
 // harness in conformance_test.go.
 //
+// # No compiled regexp is exposed
+//
+// Upstream compiles each pattern to a JavaScript RegExp and exposes it through
+// makeRe. This port has no equivalent, by necessity rather than preference: Go's
+// regexp is RE2, which has no lookaround, and picomatch's output relies on it in
+// every non-trivial pattern — the dot guard `(?!\.)(?=.)` on a leading star and
+// `(?!(?:^|\/)\.)` inside a globstar body. Six of seven representative patterns
+// fail regexp.Compile outright. Returning a *regexp.Regexp would be a promise
+// the matcher can never keep, so matching goes through [Pattern] and nothing
+// else. See DECISIONS.md.
+//
 // # Relationship to upstream
 //
 // This package contains no JavaScript and shells out to nothing. The upstream
@@ -18,26 +29,17 @@
 // test suite can be recorded offline; it is never consulted at runtime.
 package picomatch
 
-import (
-	"errors"
-	"regexp"
-)
-
-// ErrNotImplemented is returned by every entry point until the matcher lands.
-var ErrNotImplemented = errors.New("picomatch: not implemented")
-
 // Pattern is a compiled glob, safe for concurrent use once built.
 type Pattern struct {
 	glob string
 	opts Options
-	re   *regexp.Regexp
 }
 
 // Result describes a single match attempt in full.
 //
 // It mirrors the object upstream returns from `matcher(input, true)`, minus the
-// internal parser state, which is a JavaScript implementation detail this port
-// does not reproduce.
+// internal parser state and the compiled expression, which are JavaScript
+// implementation details this port does not reproduce.
 type Result struct {
 	// Glob is the pattern the matcher was compiled from.
 	Glob string
@@ -79,10 +81,12 @@ type ScanResult struct {
 }
 
 // New compiles pattern into a reusable [Pattern]. A nil opts means defaults.
+//
+// An empty pattern returns an [*Error] carrying upstream's own message.
 func New(pattern string, opts *Options) (*Pattern, error) {
 	o := opts.options()
 	if pattern == "" {
-		return nil, errors.New("picomatch: expected pattern to be a non-empty string")
+		return nil, errEmptyPattern()
 	}
 	// Deliberately unimplemented; see package docs.
 	_ = o.extglobDisabled()
@@ -103,14 +107,6 @@ func (p *Pattern) MatchDetail(input string) Result {
 	return Result{Glob: p.glob, Input: input, Output: input, Windows: p.opts.Windows}
 }
 
-// Regexp returns the regular expression the pattern compiled to.
-func (p *Pattern) Regexp() *regexp.Regexp {
-	if p == nil {
-		return nil
-	}
-	return p.re
-}
-
 // IsMatch reports whether input matches any of patterns.
 func IsMatch(input string, patterns []string, opts *Options) (bool, error) {
 	for _, pattern := range patterns {
@@ -126,15 +122,6 @@ func IsMatch(input string, patterns []string, opts *Options) (bool, error) {
 	// make every negative result look like a broken call once New is implemented,
 	// and would make an empty pattern list an error today.
 	return false, nil
-}
-
-// MakeRe compiles pattern to a regular expression.
-func MakeRe(pattern string, opts *Options) (*regexp.Regexp, error) {
-	p, err := New(pattern, opts)
-	if err != nil {
-		return nil, err
-	}
-	return p.Regexp(), nil
 }
 
 // Scan splits pattern into its literal prefix and its glob remainder without

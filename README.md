@@ -152,11 +152,21 @@ picomatch.IsMatch("a.js", []string{"*.js", "*.md"}, nil)
 picomatch.Scan("foo/bar/*.js", nil)
 ```
 
-The `Options` field set is derived from the fixtures rather than transcribed from
-upstream docs: every field is an option the upstream suite actually exercises. All
-30 observed keys, their frequencies and their value types are in
-`testdata/original/summary.json` under `optionSurface`, so the struct can be
-re-checked against evidence.
+There is no `MakeRe`. Go's `regexp` is RE2, and picomatch's output relies on
+lookaround in almost every non-trivial pattern — six of seven representative
+patterns fail `regexp.Compile` outright. Returning a `*regexp.Regexp` would be a
+promise the matcher cannot keep, so matching goes through `Pattern` alone. See
+[DECISIONS.md](DECISIONS.md).
+
+The `Options` field set is reconciled against two independent sources rather than
+transcribed from upstream docs: the 30 keys the suite actually passes (recorded in
+`testdata/original/summary.json` under `optionSurface`) and the option keys
+upstream actually reads. The two differ in both directions, and the difference is
+the point — a key the suite passes but upstream ignores gets no field
+(`relaxSlashes` is inert), and a key upstream reads but the suite never passes
+gets a field marked as unexercised (`contains`, `fastpaths`, `literalBrackets`,
+`prepend`). Both directions are re-checkable from the repo; the reasoning is in
+[DECISIONS.md](DECISIONS.md).
 
 ## Layout
 
