@@ -56,6 +56,15 @@ jobs:
         # climb from zero as the port lands.
         run: go test -tags conformance -run 'TestConformance|TestCharacterAxis' -v ./...
 
+      - name: Token gate
+        # Not a duplicate of the step above: the token harness reports its
+        # percentage the same way, but it also FAILS on any pattern the scanner
+        # answered wrongly. That check is unconditional by design, and without a
+        # step that runs it the design was aspirational — nothing else in CI
+        # executes anything behind the conformance tag except the two names in
+        # the regex above.
+        run: go test -tags conformance -run 'TestToken|TestCompareToken' -v ./...
+
       - uses: actions/upload-artifact@v4
         if: always() && matrix.os == 'ubuntu-latest'
         with:

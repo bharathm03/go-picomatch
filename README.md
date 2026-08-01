@@ -14,6 +14,10 @@ ecosystem.
 > the machinery that makes the parity claim checkable: the upstream test suite,
 > vendored byte-for-byte and hash-pinned, and a pipeline that records what
 > picomatch actually does while that suite runs.
+>
+> The scanner is underway behind that machinery and has its own number —
+> `make tokens` reads **11.80%**, and parity cannot move until it, the emitter and
+> the matcher are all finished.
 
 ---
 
@@ -147,6 +151,46 @@ make tokens           # report only
 make tokens-fixture   # re-record from upstream (needs Node)
 ```
 
+It currently reads **11.80%** — 176 of 1,491 patterns. The scanner handles literal
+text, slashes, dots, escapes, quotes and the leading-negation prologue; `*`, `?`,
+brackets, braces, parens and extglobs are not built yet.
+
+The percentage is the less useful of the two numbers it prints. Every failure is
+classified as either **unbuilt** — the scanner reached a construct it does not
+implement and refused — or **wrong**, meaning a branch that already exists
+disagreed with the recording:
+
+```
+of 1315 failures: 1315 unbuilt, 0 wrong
+blocked on * (parse.js:1128)          696
+blocked on !( extglob (parse.js:1056) 145
+blocked on [ (parse.js:814)           140
+```
+
+Unbuilt is expected and shrinks on its own as branches land. Wrong is not
+supposed to be nonzero at any point, so it fails the run rather than lowering a
+score — unlike the percentage floor, that check is not opt-in, and CI runs the
+gate as its own step. The same table gives the build order without anyone having
+to choose one.
+
+`0 wrong` is not a claim about the 176 patterns that parse end to end. A pattern
+the scanner declines still returns the tokens it produced first, and those are
+compared against the recording's leading tokens — so a bug in a branch that
+exists is reported as wrong even when the same pattern trips on something unbuilt
+further along. One token is exempt: upstream rewrites tokens after pushing them,
+always the one immediately before, so the token adjacent to the construct that
+stopped the scanner is not yet final. DECISIONS.md §9 has the measurement.
+
+An unbuilt construct returns an error rather than falling back to treating the
+input as literal text. The fallback would produce a token stream that is wrong
+but plausible, and wherever the guess happened to coincide it would score as a
+pass that looks exactly like a branch someone wrote.
+
+Two inputs get an error for a different reason. A pattern over `maxLength` is
+refused the way upstream refuses it, and a pattern on which upstream's own
+`parse()` never returns — `a` followed by four or more backslashes hangs node —
+is reported rather than reproduced or quietly answered. DECISIONS.md §11.
+
 Each record carries which of picomatch's three parsers `makeRe` would really have
 used, **measured rather than transcribed** — the inline fast path's condition
 (`parse.js:606`) tests the input *after* `removePrefix` rewrote it, so `./foo`
@@ -247,7 +291,7 @@ gets a field marked as unexercised (`contains`, `fastpaths`, `literalBrackets`,
 | ----------------------- | -------------------------------------------------------------- |
 | `picomatch.go`          | Public API (declared, not yet implemented)                       |
 | `options.go`            | `Options`, derived from the observed option surface              |
-| `internal/parse/`       | The scanner: pattern in, token stream out (declared, not built)  |
+| `internal/parse/`       | The scanner: pattern in, token stream out (partially built)      |
 | `internal/testcase/`    | Fixture loader and decoder for the recorded value encoding       |
 | `internal/tokencase/`   | Fixture loader for the recorded token streams                    |
 | `conformance_test.go`   | Parity harness, behind the `conformance` build tag               |
@@ -262,6 +306,7 @@ gets a field marked as unexercised (`contains`, `fastpaths`, `literalBrackets`,
 | `tools/charaxis/`       | Generates the character-domain fixtures                          |
 | `tools/tokens/`         | Generates the golden token streams                               |
 | `tools/probes/`         | Diagnostics: which parser ran, which rule decided it             |
+| `docs/`                 | Porting notes — read before writing the layer they cover         |
 | `DECISIONS.md`          | Every non-trivial divergence from the original, with rationale   |
 
 ## No source-language runtime

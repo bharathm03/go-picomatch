@@ -13,6 +13,15 @@ the *evidence machinery*: upstream's own Mocha suite vendored byte-for-byte, a
 recorder that captures what picomatch does while that suite runs, and several
 independent measurement harnesses.
 
+`internal/parse` is partially built — text, slashes, dots, escapes, quotes and
+the negation prologue, at 11.80% on `make tokens`. It **declines** constructs it
+has not reached (`*`, `?`, `[`, `{`, `(`, extglobs) with an `UnsupportedError`
+naming the upstream site, rather than falling back to literal text. Keep that
+rule when adding branches: a plausible-but-wrong token stream scores as a pass
+wherever the guess coincides, which is indistinguishable from real progress. The
+token gate counts *unbuilt* and *wrong* separately and fails outright on any
+*wrong*.
+
 The organising principle everywhere: **fixtures are recorded, never authored.**
 No file in `testdata/` states what picomatch ought to do; every expected value
 came from running upstream. Keep it that way — the whole claim of the repo rests
@@ -151,6 +160,17 @@ backtracking AST walker. DECISIONS.md §1.
   conformance` will not surface otherwise.
 - **`ErrNotImplemented` is scored as a failure**, never as a match for a recorded
   throw. It is a placeholder, not a behavioural answer.
+- **`parse.Parse` returns a partial state alongside an `UnsupportedError`.** The
+  token gate compares it against the recording's leading tokens, which is what
+  makes `0 wrong` a statement about built branches rather than about the 176
+  patterns that parse end to end. The last token is exempt because upstream
+  rewrites `prev` after pushing it — DECISIONS.md §9. Returning `nil` there
+  silently guts the gate.
+- **Upstream's `parse()` does not terminate on some inputs** (`a` plus four or
+  more backslashes). The scanner detects it and errors; `eos()` is `>=`, not
+  upstream's `==`, so the loop cannot run away. DECISIONS.md §11. No fixture can
+  cover this — the recorder hangs on the same input — so the untagged
+  `internal/parse` tests are the only thing holding it.
 - **Stdlib only.** No third-party imports, no `unsafe`, no cgo. `any` is confined
   to the harness and `internal/testcase`, where it decodes arbitrary JSON.
 - **Options field names encode evidence, not taste.** `NoFastpaths` (upstream
@@ -163,7 +183,10 @@ backtracking AST walker. DECISIONS.md §1.
 - **picomatch counts UTF-16 code units**, not runes or bytes. `for i, r := range s`
   and `len(s)` are both wrong for `?`, `maxLength`, and character classes. This is
   the single most likely way an idiomatic Go implementation silently diverges, and
-  no upstream fixture catches it.
+  no upstream fixture catches it. `internal/parse` holds its input as
+  `units` (`[]uint16`) and converts only at the package boundary — DECISIONS.md §8.
+  Keep new branches on `units`; a token value built as a Go string cannot hold
+  half a surrogate pair, so the distinction is lost before anything compares it.
 - **Argument order in fixtures:** `picomatch.isMatch(str, pattern)` — input first,
   pattern is `args[1]`. Getting it backwards does not throw; it produces a corpus
   of inputs-treated-as-patterns. `tools/probes/lib/corpus.js` is the single
@@ -185,5 +208,15 @@ backtracking AST walker. DECISIONS.md §1.
   than trusting the prose.
 - `tools/mutate/README.md` — what the fixtures cannot see, and why each hole is a
   case where the idiomatic Go code is the wrong code.
+- `docs/transcription-traps.md` — places where the obvious Go reading of
+  `lib/parse.js` is wrong: `!` falls through rather than continuing, the text
+  merge is JavaScript-truthy, `}` emits a literal where `]` escapes, `consumed` is
+  not a slice of the input. **Read it before adding a scanner branch**, and add an
+  entry when a branch turns up another. Each entry needs the upstream site, the
+  reading that would have been wrong, and what it costs.
+
+Prose learnings go in `docs/`, not in a comment block at the top of a file. The
+code keeps one-line markers at the sites they describe; the reasoning lives in
+`docs/` where it can be read before the file is opened.
 
 `fuzz/` and `bench/` are scaffolding only; both land after the matcher does.

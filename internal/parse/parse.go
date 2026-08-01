@@ -2,10 +2,26 @@
 //
 // # Status
 //
-// [Parse] is declared but not implemented. What exists is the shape, and the
-// shape is measured rather than designed — every field below appears in
-// testdata/tokens/summary.json under "tokenFields", recorded from upstream's own
-// parser over the 1,491 patterns its test suite uses.
+// Partially built. [Parse] handles literal text, slashes, dots, escapes, quotes,
+// the leading-negation prologue and the ./ prefix rules; it declines "*", "?",
+// brackets, braces, parens and extglobs with an [UnsupportedError] naming the
+// upstream site that implements them. `make tokens` reports 176 of 1,491
+// recorded patterns matching (11.80%), with every remaining failure classified
+// as unbuilt rather than wrong.
+//
+// The type shapes below are measured rather than designed — every field appears
+// in testdata/tokens/summary.json under "tokenFields", recorded from upstream's
+// own parser over the 1,491 patterns its test suite uses.
+//
+// # It refuses rather than guesses
+//
+// A construct that has not been built returns an error instead of falling back
+// to treating the input as literal text. The fallback would produce a token
+// stream that is wrong but plausible, and on any pattern where the guess
+// happened to coincide it would score as a pass — indistinguishable in the
+// gate's percentage from a branch that was actually written. The token gate
+// counts the two separately for the same reason: unbuilt patterns are expected
+// and shrink as branches land, while a wrong one fails the run outright.
 //
 // # Why the port has a token stream at all
 //
@@ -30,13 +46,70 @@
 // here is reachable by an importer of the root package.
 package parse
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
-// ErrNotImplemented is returned by [Parse] until the scanner lands.
+// ErrUnsupported reports a construct the scanner has not been built for yet.
 //
-// Declared here rather than reused from the root package because the dependency
-// runs the other way: the root package will import this one.
-var ErrNotImplemented = errors.New("picomatch/parse: not implemented")
+// It exists so that an unfinished scanner fails loudly instead of guessing. The
+// alternative — treating an unhandled character as literal text — produces a
+// token stream that is wrong but plausible, and would score as a pass on any
+// pattern where the guess happened to coincide.
+var ErrUnsupported = errors.New("picomatch/parse: construct not implemented")
+
+// UnsupportedError names the construct and the upstream site that handles it, so
+// the token gate can report what the scanner is still missing rather than only
+// how many patterns fail.
+type UnsupportedError struct {
+	Construct string // the syntax encountered, e.g. "*" or "+( extglob"
+	Site      string // the upstream branch that implements it, e.g. "parse.js:1128"
+	Index     int    // code-unit offset into the post-removePrefix input
+}
+
+func (e *UnsupportedError) Error() string {
+	return fmt.Sprintf("picomatch/parse: %s not implemented (%s), at index %d", e.Construct, e.Site, e.Index)
+}
+
+func (e *UnsupportedError) Unwrap() error { return ErrUnsupported }
+
+// LengthError is upstream's maxLength guard (parse.js:367). Upstream throws a
+// SyntaxError with this message; the root package maps it when it needs to
+// reproduce the recorded throw.
+//
+// Length is counted in UTF-16 code units, not bytes or runes. See units.go.
+type LengthError struct {
+	Length int
+	Max    int
+}
+
+func (e *LengthError) Error() string {
+	return fmt.Sprintf("Input length: %d, exceeds maximum allowed length: %d", e.Length, e.Max)
+}
+
+// NonTerminatingError reports input on which upstream's parse() does not return.
+//
+// It is not a transcription of an upstream throw — there is no throw. Upstream's
+// eos() test is `state.index === input.length - 1`, and the backslash-run
+// collapse at parse.js:689-699 can step the index past that value, after which
+// the loop runs forever. Verified against node: "a" followed by four or more
+// backslashes never returns, three or fewer do.
+//
+// The port detects the overshoot and reports it rather than reproducing the
+// hang or inventing a state. Both alternatives are worse in the same way an
+// unbuilt construct falling back to literal text would be: there is no recorded
+// answer here, no fixture can ever hold one (the extractor would hang on the
+// same input), and a plausible state would be indistinguishable from a real one.
+// DECISIONS.md §11.
+type NonTerminatingError struct {
+	Site  string // the upstream branch that steps over the end, "parse.js:689"
+	Index int    // code-unit offset the collapse left the index at, one before the step that passes the end
+}
+
+func (e *NonTerminatingError) Error() string {
+	return fmt.Sprintf("picomatch/parse: upstream parse() does not terminate on this input (%s), at index %d", e.Site, e.Index)
+}
 
 // Token is one unit of a parsed pattern.
 //
@@ -103,6 +176,35 @@ type State struct {
 // a separate normalisation pass and do not belong here; see
 // tools/probes/fastpath-diff.js for why they are separate rather than an
 // optimisation of this one.
+//
+// # The state is returned alongside an error
+//
+// On an [UnsupportedError] the returned state is not nil: it is everything the
+// scanner produced before it reached the construct it could not handle. Callers
+// must not read it as an answer — it is a prefix, and Consumed and Output stop
+// where the scanner did.
+//
+// It is returned because discarding it hides a whole class of bug. The token
+// gate classifies a failure as *unbuilt* or *wrong*, and with no partial state
+// it can only ever say "unbuilt" for a pattern that trips on an unbuilt
+// construct — including when a branch that does exist got the tokens before it
+// wrong. The @ branch is the standing example: it is only reached when the next
+// character is "(", which is unsupported, so nothing it emits could be scored at
+// all. DECISIONS.md §9.
+//
+// [LengthError] and [NonTerminatingError] return a nil state. Neither has a
+// meaningful prefix: the first is refused before scanning starts, and the second
+// is a point at which upstream stops producing anything.
 func Parse(pattern string) (*State, error) {
-	return nil, ErrNotImplemented
+	s, err := newScanner(pattern)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.run(); err != nil {
+		if _, ok := errors.AsType[*UnsupportedError](err); ok {
+			return s.export(), err
+		}
+		return nil, err
+	}
+	return s.export(), nil
 }

@@ -287,6 +287,214 @@ trusted.
 
 ---
 
+## 8. The scanner indexes UTF-16 code units, not bytes or runes
+
+**Upstream.** JavaScript strings are sequences of UTF-16 code units. `input[i]`,
+`input.length`, `input.slice()` and every regex the parser runs all work in those
+units, so one astral character such as `U+1F600` is two positions.
+
+**This port.** `internal/parse` holds its input as `units` (`[]uint16`) and does
+every index, slice and length comparison on it. Go strings appear only at the
+package boundary, in `Parse`'s argument and in the exported `Token` values.
+
+**Why.** The two idiomatic Go readings are both wrong, and they are wrong by
+different amounts. For `"\U0001F600"`, `len(s)` is 4, `len([]rune(s))` is 1, and
+picomatch counts 2. Three places in the scanner depend on the count rather than
+on the characters:
+
+| Site | What breaks under the wrong count |
+| --- | --- |
+| `maxLength` (`parse.js:367`) | a rune-counting guard accepts up to twice the input upstream rejects |
+| `?` (`parse.js:1021`) | matches a whole astral character instead of one half |
+| character-class bodies (`parse.js:755`) | accumulated one unit at a time, so they are mid-surrogate between iterations and unrepresentable in a Go string |
+
+This is decided at the representation rather than patched at the call sites
+because the third row cannot be patched: a Go string cannot hold half a surrogate
+pair, so a scanner that stores values as strings has already lost the
+distinction before anything compares them.
+
+**No fixture in `testdata/original` would report the mistake.** The recorded
+token corpus contains five non-ASCII patterns, all BMP (`U+30C0`–`U+30EB`), and
+no astral ones, so its counts are identical under all three readings.
+`tools/mutate` measures the same blindness from the other direction: the
+`runes-not-code-units` mutation survives all 18,792 upstream fixtures. The
+evidence that this matters lives in `testdata/charaxis`, and the arithmetic is
+asserted directly in `internal/parse/units_test.go` — which is deliberately in
+the *untagged* suite, since the tagged token gate cannot see any of it.
+
+`units_test.go` asserts UTF-16, not picomatch. It is not a hand-authored fixture:
+what picomatch does is still recorded, never stated.
+
+**Re-check.** `go test ./internal/parse/ -run 'UTF16|CodeUnits'` — the maxLength
+case is built from 32,768 astral characters, exactly at the 65,536-unit cap, so a
+rune-counting guard passes an input twice the size upstream rejects. Then
+`node tools/mutate/run.js` for the `runes-not-code-units` row: upstream 0.
+
+---
+
+## 9. An unbuilt construct is an error, never a guess
+
+**Upstream.** Not applicable — upstream's parser is finished. This is a decision
+about how an *unfinished* port reports itself.
+
+**This port.** `internal/parse.Parse` returns an `UnsupportedError` naming the
+construct and the upstream site (`"*" (parse.js:1128)`) when it reaches syntax
+whose branch has not been written. It never falls back to treating unhandled
+input as literal text.
+
+**Why.** The fallback is the tempting one — it keeps the parser total and lets
+the gate's percentage rise sooner — and it is exactly wrong here. Treating `*` as
+text produces a token stream that is wrong but *plausible*, and on any pattern
+where the guess happened to coincide with the recording it scores as a pass. In
+the gate's percentage that pass is indistinguishable from a branch someone
+actually wrote, so the number stops measuring the scanner and starts measuring
+how often a guess got lucky. That is the same failure this repo exists to rule
+out, one layer down from editing a fixture.
+
+Because the errors are typed, the token gate can split its failures into two
+columns that mean different things:
+
+- **unbuilt** — the scanner refused. Expected, and shrinks on its own as branches
+  land.
+- **wrong** — a branch that already exists disagreed with the recording. Not
+  expected at any point.
+
+`wrong` fails the run outright rather than lowering a score, and unlike
+`PICOMATCH_TOKENS_MIN` that check is not opt-in — there is no stage of the port
+at which a nonzero value is acceptable. It is enforced by its own CI step: the
+harness lives behind the `conformance` tag, which no other step runs, so
+"unconditional" was aspirational until one existed. The percentage is the less
+useful of the two numbers: it climbs as constructs are added, whereas `wrong`
+only moves when something already built breaks.
+
+The same grouping also produces the build order without anyone choosing it:
+`unbuiltByConstruct` in `tokens-report.json` counts how many patterns each
+missing construct blocks, so the branch worth writing next is measured rather
+than argued for.
+
+**A declined parse still returns its tokens, and they are still scored.** `Parse`
+gives up at the first construct it cannot handle, so if it returned nothing on
+the way out, every pattern containing one would be scored from the error alone —
+and with 1,315 of 1,491 patterns in that state, "0 wrong" would be a claim about
+the 176 that parse end to end. Worse, some branches could never be scored at all:
+the `@` branch is only entered when the next character is `(`, which is
+unsupported. So `Parse` returns the partial state alongside the
+`UnsupportedError`, and `comparePrefix` in `tokens_test.go` checks it against the
+recording's leading tokens.
+
+The last of those tokens is excluded, and the reason is measured. A pushed token
+is not final — every retroactive assignment in `parse.js` is to `prev.<field>`
+(`:500-502`, `:722`, `:730`, `:867`, `:872`, `:999-1001`, `:1129-1132`,
+`:1179-1236`), so the token adjacent to the construct that stopped the scanner is
+exactly the one that construct would have edited. Comparing it reports 592 of the
+1,491 corpus patterns as `wrong` against a scanner that is right: `js/*.js`
+records the slash before the star with output `\/(?!\.)(?=.)`, which the star
+branch writes, and no correct scanner produces that before the star branch
+exists. Everything earlier is settled, because `prev` is always the last pushed
+token. The cost is that the token immediately before an unbuilt construct is
+still unscored — including the `@` case above.
+
+**Re-check.** `make tokens` prints the split and the blocking constructs.
+`go test -tags conformance -run TestCompareTokensChecksStateAndLength ./...`
+asserts that a declined construct is classified as unbuilt, that a genuine
+disagreement is not, and that a parse error never compares equal. For the prefix
+scoring specifically: break a built branch that runs before an unbuilt one —
+changing the slash output from `slashLiteral` to `"/"` moves `make tokens` from
+`0 wrong` to 238, of which 151 are only visible because the prefix is compared.
+
+---
+
+## 10. The `string` boundary is lossy in two directions, and both are recorded
+
+**Upstream.** A JavaScript string is a sequence of UTF-16 code units with no
+further constraint. It can hold an unpaired surrogate, and it has no
+representation for a byte that is not part of one.
+
+**This port.** `Parse` takes and returns Go strings. `encode` substitutes U+FFFD
+for each byte of invalid UTF-8 on the way in; `units.String` substitutes U+FFFD
+for an unpaired surrogate on the way out. Both are documented at the functions
+in `internal/parse/units.go`. Neither is worked around.
+
+**Why, going in.** There is nothing for a stray `0xFF` byte to become — JS has no
+such value — so any mapping is invented. The cost is real and worth stating
+plainly rather than discovering later: `encode("a\xffb")` and `encode("a\xfeb")`
+produce the same units, so `State.Consumed` does not round-trip a pattern
+containing invalid UTF-8, and two such patterns are indistinguishable to this
+package. Whether the public API should take `[]byte` instead is a question about
+[§1](#1-no-compiled-regular-expression-is-exposed)-level signatures, not about
+the scanner, and it is not settled here.
+
+**Why, coming out.** This one is a genuine divergence from a recorded value, not
+just from a hypothetical caller. The scanner does not merely pass surrogates
+through — it splits them. Upstream's quoted-string branch (`parse.js:765-770`)
+appends to `prev.value` alone, so a token value or output can end on a lone high
+surrogate, and upstream records it as one. Parsing `@"\` followed by U+1F600
+gives token 1 an output of `@\` plus a lone `U+D83D` upstream and `@\` plus
+U+FFFD here. An exhaustive enumeration over patterns of up to five characters
+drawn from `{"`, `\`, U+1F600, `a`, `@`, `.`, `/`} found 31 of 19,599 differing
+this way, every one a U+FFFD substitution.
+
+**Why it is not fixed.** It could be: Go strings can carry WTF-8, so
+`units.String` could encode a lone surrogate as `ED A0 BD` rather than folding it
+to U+FFFD. That change alone makes things worse, not better. The fixture side is
+lossy in the same place and by the same amount — `encoding/json` maps `\uD83D` to
+U+FFFD when `internal/tokencase` decodes a record — so today the two agree by
+coincidence, and a port that stopped losing the surrogate would start failing the
+gate against a fixture loader that still does. The fix is both halves at once,
+and it belongs with `internal/tokencase`, not here.
+
+**No fixture reports it.** The token corpus contains no astral pattern at all
+(five non-ASCII patterns, all BMP), which is the same blindness
+[§8](#8-the-scanner-indexes-utf-16-code-units-not-bytes-or-runes) records from
+the counting side.
+
+**Re-check.** `node -e` on `tests/original/lib/parse.js` against
+`internal/parse` for the pattern above; and
+`go test ./internal/parse/ -run 'UTF16|CodeUnits'` for the arithmetic that still
+holds.
+
+---
+
+## 11. Input on which upstream never returns is an error, not a hang
+
+**Upstream.** `parse()` does not terminate on some inputs. Its `eos()` is
+`state.index === input.length - 1`, an equality, and the backslash-run collapse
+at `parse.js:689-699` does `state.index += slashes` followed by `advance()`,
+which can step the index past that value. Once it has, `eos()` is never true
+again, `advance()` returns `''` forever, and the loop spins.
+
+Measured, not inferred: `a` followed by one, two or three backslashes returns; `a`
+followed by four or more never does. There is no throw, no output, and no
+timeout.
+
+**This port.** The scanner detects the overshoot and returns a
+`NonTerminatingError` naming the upstream site. `eos()` is also widened from `==`
+to `>=`, so the loop stays bounded even if a future branch finds another way to
+step over the end.
+
+**Why not reproduce it.** Faithfulness has nothing to be faithful *to* here.
+Upstream produces no observable result for this input, so there is no recorded
+behaviour to match, and no fixture can ever hold one — `tools/extract` runs
+upstream to record it and would hang on the same pattern. That blindness is
+structural, not an oversight in the corpus.
+
+**Why not invent an answer either.** Terminating quietly is the other tempting
+option: widen `eos()`, let the loop fall out, and return whatever state happens
+to have accumulated. That is the fallback
+[§9](#9-an-unbuilt-construct-is-an-error-never-a-guess) rejects, one layer over —
+a plausible state upstream never produces, indistinguishable in the gate from a
+real one. An error says exactly what is known: upstream does not answer this.
+
+`NonTerminatingError` returns a nil state for the same reason.
+
+**Re-check.** `go test ./internal/parse/ -run 'Terminat'` — a five-second
+deadline around `Parse` over backslash runs of 1 to 12, and the boundary at three
+versus four. Upstream's half:
+`node -e "require('./tests/original/lib/parse.js')('a\\\\\\\\', {fastpaths:false})"`
+does not return.
+
+---
+
 ## Escape hatches
 
 None. No `unsafe`, no cgo, no `any` in non-generic positions in the port itself.
