@@ -42,3 +42,8 @@ charaxis-report.json
 # NOTE: testdata/original/ is generated but deliberately committed. It is the
 # evidence the parity claim rests on, and committing it means `go test` works
 # without Node installed. Regenerate with `make extract`.
+
+# Written by `make probes-data`. Unlike testdata/original/, nothing replays
+# these — they are diagnostics you regenerate when investigating a failure, and
+# fingerprints.jsonl alone is ~40MB. Regenerate with `make probes-data`.
+testdata/probes/

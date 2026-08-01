@@ -89,6 +89,22 @@ charaxis: verify-original
 mutate: verify-original
 	node tools/mutate/run.js
 
+# --- Diagnostics -------------------------------------------------------------
+
+## probes: measure upstream's structure — parsers, tokens, boundaries (reports only)
+.PHONY: probes
+probes: verify-original
+	node tools/probes/fastpath-diff.js
+	node tools/probes/token-inventory.js
+	node tools/probes/fingerprint.js
+
+## probes-data: write the probe artifacts to testdata/probes/ (gitignored)
+.PHONY: probes-data
+probes-data: verify-original
+	OUT=testdata/probes/fingerprints.jsonl node tools/probes/fingerprint.js
+	OUT=testdata/probes/tokens.jsonl node tools/probes/token-inventory.js
+	OUT=testdata/probes/fastpath-divergent.jsonl node tools/probes/fastpath-diff.js
+
 ## help: list targets
 .PHONY: help
 help:
