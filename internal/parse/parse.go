@@ -2,12 +2,18 @@
 //
 // # Status
 //
-// Partially built. [Parse] handles literal text, slashes, dots, escapes, quotes,
-// the leading-negation prologue and the ./ prefix rules; it declines "*", "?",
-// brackets, braces, parens and extglobs with an [UnsupportedError] naming the
-// upstream site that implements them. `make tokens` reports 176 of 1,491
-// recorded patterns matching (11.80%), with every remaining failure classified
-// as unbuilt rather than wrong.
+// Complete for the scanner's default-options path. [Parse] handles literal
+// text, slashes, dots, escapes, quotes, the leading-negation prologue, the ./
+// prefix rules, the star, the globstar, parentheses, the five extglobs,
+// character classes including the POSIX [[:name:]] forms, "?", and braces —
+// both the "{a,b}" list and the "{a..b}" range. `make tokens` reports 1,491 of
+// 1,491 recorded patterns matching (100.00%), with 0 wrong.
+//
+// No construct is declined any more, so [UnsupportedError] no longer names one.
+// What remains unbuilt is the option surface: every opts.X branch in
+// tests/original/lib/parse.js that the defaults do not take is marked at its
+// site rather than written. Those are the emitter's and the matcher's problem,
+// not the scanner's.
 //
 // The type shapes below are measured rather than designed — every field appears
 // in testdata/tokens/summary.json under "tokenFields", recorded from upstream's
@@ -164,7 +170,30 @@ type State struct {
 	Negated bool
 	// Backtrack reports that some token was rewritten after being emitted, so
 	// Output was discarded and rebuilt from Tokens.
+	//
+	// It is set at two sites in upstream — parse.js:1133, a star folded into a
+	// token an earlier star already collapsed, and :561, extglobClose's risky
+	// rewrite — not at every retroactive rewrite. The globstar arms at :1188-1243
+	// rewrite two tokens back and deliberately leave it false; see
+	// docs/transcription-traps.md #19.
 	Backtrack bool
+	// Globstar reports that some "**" reached one of the globstar arms.
+	//
+	// Upstream sets state.globstar at six sites (parse.js:1134, :1183, :1195,
+	// :1212, :1225, :1241) and reads it nowhere — not in parse.js, not in
+	// picomatch.js. It is carried here because it is state upstream maintains
+	// and the port's scanner has to maintain it anyway to stay a transcription;
+	// no caller should read meaning into it that upstream does not.
+	Globstar bool
+	// NegatedExtglob reports a "!(…)" whose "!" was the first thing in the
+	// pattern proper.
+	//
+	// Upstream sets state.negatedExtglob at one site (parse.js:594, guarded by
+	// token.prev.type === "bos") and, unlike Globstar, it is read: lib/scan.js
+	// reports the same flag and test/api.picomatch.js:368-378 asserts it on the
+	// parse state. It is carried for that reason, not as a promise to callers —
+	// DECISIONS.md §6 still applies to this whole type.
+	NegatedExtglob bool
 	// Tokens is the authoritative representation. See the package doc.
 	Tokens []Token
 }
@@ -188,9 +217,13 @@ type State struct {
 // gate classifies a failure as *unbuilt* or *wrong*, and with no partial state
 // it can only ever say "unbuilt" for a pattern that trips on an unbuilt
 // construct — including when a branch that does exist got the tokens before it
-// wrong. The @ branch is the standing example: it is only reached when the next
-// character is "(", which is unsupported, so nothing it emits could be scored at
-// all. DECISIONS.md §9.
+// wrong. DECISIONS.md §9.
+//
+// The prefix is now everything the scanner produced. It used to stop at the last
+// open "+(" or "*(", because extglobClose may rewrite every token from there
+// onwards and what decides that is input the scanner had not read; with braces
+// built there is no construct left to decline inside an extglob body, so the
+// truncation is unreachable and is gone. DECISIONS.md §14.
 //
 // [LengthError] and [NonTerminatingError] return a nil state. Neither has a
 // meaningful prefix: the first is refused before scanning starts, and the second

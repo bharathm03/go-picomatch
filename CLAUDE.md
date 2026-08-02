@@ -8,19 +8,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Go port of [picomatch](https://github.com/micromatch/picomatch) v4.0.5 (Port
 Mortem 2026, Track F). **The matcher is not implemented** — every public entry
-point returns `ErrNotImplemented` and behavioural parity is 0.01%. What exists is
-the *evidence machinery*: upstream's own Mocha suite vendored byte-for-byte, a
-recorder that captures what picomatch does while that suite runs, and several
-independent measurement harnesses.
+point that reaches it returns `ErrNotImplemented`, and behavioural parity is
+3.13%. What exists is the *evidence machinery*: upstream's own Mocha suite
+vendored byte-for-byte, a recorder that captures what picomatch does while that
+suite runs, and several independent measurement harnesses.
 
-`internal/parse` is partially built — text, slashes, dots, escapes, quotes and
-the negation prologue, at 11.80% on `make tokens`. It **declines** constructs it
-has not reached (`*`, `?`, `[`, `{`, `(`, extglobs) with an `UnsupportedError`
-naming the upstream site, rather than falling back to literal text. Keep that
-rule when adding branches: a plausible-but-wrong token stream scores as a pass
-wherever the guess coincides, which is indistinguishable from real progress. The
-token gate counts *unbuilt* and *wrong* separately and fails outright on any
-*wrong*.
+`Scan` is the one exception. `internal/scan` is a complete port of `lib/scan.js`
+— a second upstream entry point with its own state machine, sharing no code with
+`parse()` — and all 586 recorded `lib/scan.scan` cases pass. It accounts for 586
+of the 588 parity passes and touches the matcher nowhere, so none of it is credit
+against the 15,060 `isMatch` cases. DECISIONS.md §13 records the two upstream
+values it deliberately does not reproduce (`opts.tokens`, `basename("")`).
+
+`internal/parse` holds the *scanner*, and under default options it is complete:
+`make tokens` reads 100.00% — 1,491 of 1,491 — with `0 unbuilt` and `0 wrong`.
+Every construct is built (text, slashes, dots, escapes, quotes, the negation
+prologue, stars and globstars, extglobs, brackets, braces and `?`), so no input
+is declined any more and `UnsupportedError` no longer names a construct.
+
+What remains in `internal/parse` is the **option surface**, not another branch.
+Roughly forty sites are transcribed but marked rather than written, each reachable
+only once `Options` are threaded in; `grep -n "opts\." internal/parse/*.go` is the
+authoritative list. Three need an answer before code: `literalBrackets` (tested
+`=== false` at parse.js:856 and `=== true` at :865, so unset is a third state),
+`maxExtglobRecursion` (a number or `false`), and `expandRange` (parse.js:23 — a
+caller-supplied *function*, with no `Options` field yet; DECISIONS.md §15).
+
+The decline rule still governs everything added from here. Never fall back to
+plausible output: a plausible-but-wrong token stream scores as a pass wherever the
+guess coincides, which is indistinguishable from real progress. The token gate
+counts *unbuilt* and *wrong* separately and fails outright on any *wrong*.
 
 The organising principle everywhere: **fixtures are recorded, never authored.**
 No file in `testdata/` states what picomatch ought to do; every expected value

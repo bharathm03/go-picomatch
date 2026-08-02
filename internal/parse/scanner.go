@@ -8,18 +8,49 @@ package parse
 //
 // [Parse] takes no options yet, so every opts.X read in upstream resolves to its
 // default here: dot, bash, capture, posix, strictBrackets, strictSlashes,
-// nobrace, nobracket, noextglob, nonegate, unescape, keepQuotes and regex are all
+// nobrace, nobracket, noextglob, noglobstar, nonegate, unescape, keepQuotes,
+// regex, literalBrackets, maxExtglobRecursion, prepend and expandRange are all
 // unset. Branches those keys select are marked with the key that will pick them
 // once options are threaded through, so the sites are findable rather than
-// silently baked in.
+// silently baked in. `grep -n "opts\." internal/parse/*.go` is the list.
 //
 // # What is not built yet
 //
-// Constructs the scanner has not reached return an [UnsupportedError] naming the
-// construct and the upstream site. They are not approximated as text — a wrong
-// token stream scores as a pass only if it happens to match, and treating an
-// unbuilt construct as literal text is exactly the kind of near-miss that would.
-// DECISIONS.md §9.
+// Every branch of upstream's loop is written; the brace branch was the last, so
+// no default-options input reaches an [UnsupportedError] any more. What is left
+// is the option surface — each opts.X branch the defaults do not take is marked
+// at its site with the key that selects it.
+//
+// The rule the markers replace still stands for whoever writes them. A construct
+// this package cannot answer returns an error naming the upstream site; it is
+// never approximated as text, because a wrong token stream scores as a pass
+// wherever it happens to match. DECISIONS.md §9.
+//
+// # Retroactive rewrites
+//
+// Six sites edit a token after it has been pushed and emitted, and all but two
+// also have to un-write what state.output already holds: starGuard
+// (parse.js:1263-1281), push()'s globstar lookbehind (:494-505), the globstar
+// arms (:1188-1243), which reach two tokens back, extglobClose's risky path
+// (:544-566), which reaches back to the extglob's opening token and blanks
+// everything after it, the POSIX-class rewrite (:730-736), which reaches all the
+// way to bos and leaves state.output alone because it sets state.backtrack, and
+// the brace close (:907-934), which either pops every token back to the opening
+// brace or rewrites both delimiters and replays state.output from the brace's own
+// outputIndex. state.backtrack is *not* the general mechanism — it is set at four
+// sites, :561, :731, :922 and :1133, and the globstar arms deliberately leave it
+// alone while keeping state.output in step by hand.
+// docs/transcription-traps.md #19.
+//
+// The bos rewrite is the deepest in the file and needs no special handling for
+// the same reason it needs no backtrack bookkeeping: no construct can decline
+// between the bracket token being pushed and the rewrite, because nothing is
+// unbuilt while state.brackets is nonzero. DECISIONS.md §9.
+//
+// The fourth and the sixth are the two whose firing is not decided until a later
+// character, and both used to be a problem for what a *declined* parse could hand
+// back. Neither is now: with nothing unbuilt the scanner cannot stop while either
+// rewrite is pending. DECISIONS.md §14.
 //
 // # Before adding a branch
 //
@@ -29,10 +60,51 @@ package parse
 
 // Platform constants from constants.js. These are the POSIX set; the Windows set
 // (SLASH_LITERAL "[\\/]" and friends) arrives with Options.Windows.
+//
+// The derived ones are spelled as concatenations of the constants they are built
+// from, exactly as constants.js:12-27 builds them, so that the Windows set can be
+// added by overriding the two leaves (SLASH_LITERAL and QMARK) rather than by
+// re-deriving eight strings by hand.
 const (
 	dotLiteral   = `\.`
 	slashLiteral = `\/`
 	plusLiteral  = `\+`
+	oneChar      = `(?=.)`
+	qmark        = `[^/]`
+	endAnchor    = `(?:` + slashLiteral + `|$)`
+
+	// qmarkNoDot is constants.QMARK_NO_DOT (constants.js:25). It is its own
+	// leaf, spelled `[^.` + SLASH_LITERAL + `]`, and not a composition of the
+	// two constants above: NO_DOT + QMARK would be `(?!\.)[^/]`, a lookahead
+	// followed by a class rather than one class excluding both.
+	qmarkNoDot  = `[^.` + slashLiteral + `]`
+	startAnchor = `(?:^|` + slashLiteral + `)`
+	dotsSlash   = dotLiteral + `{1,2}` + endAnchor
+	noDot       = `(?!` + dotLiteral + `)`
+	noDotSlash  = `(?!` + dotLiteral + `{0,1}` + endAnchor + `)`
+	noDotsSlash = `(?!` + dotsSlash + `)`
+
+	// capture is the binding at parse.js:374: opts.capture ? "" : "?:". It is
+	// the only thing opts.capture changes about the globstar body, so it is
+	// spelled separately rather than folded into the string below.
+	capture = `?:`
+
+	// globstarBody is the globstar() helper at parse.js:395-397 evaluated under
+	// default options — opts.dot selects DOTS_SLASH in place of DOT_LITERAL. It
+	// is a function upstream because it reads opts at each call site, and every
+	// one of those sites is in the branch at :1145-1244.
+	globstarBody = `(` + capture + `(?:(?!` + startAnchor + dotLiteral + `).)*?)`
+
+	// star is constants.STAR. Upstream rebinds it at parse.js:401-405 —
+	// opts.bash swaps in globstar(opts) and opts.capture wraps it in a group —
+	// so this is the default-options value of that binding, not only the
+	// constant.
+	star = qmark + `*?`
+
+	// nodot is the binding at parse.js:399: opts.dot ? "" : NO_DOT. It is a
+	// separate name from noDot because the option is read there and nowhere
+	// else, so that is the one site Options.Dot has to reach.
+	nodot = noDot
 )
 
 // maxLength is constants.MAX_LENGTH, 1024 * 64.
@@ -44,6 +116,52 @@ var replacements = map[string]string{
 	"***":      "*",
 	"**/**":    "**",
 	"**/**/**": "**",
+}
+
+// posixRegexSource is constants.POSIX_REGEX_SOURCE, the [[:name:]] classes.
+//
+// Upstream declares it with `__proto__: null`, so the lookup at parse.js:728 has
+// no inherited keys to fall back on — POSIX_REGEX_SOURCE["constructor"] is
+// undefined rather than a function. A Go map has that property already; the
+// prototype-less declaration is upstream guarding against the same thing, not a
+// behaviour a plain map would miss.
+var posixRegexSource = map[string]string{
+	"alnum":  "a-zA-Z0-9",
+	"alpha":  "a-zA-Z",
+	"ascii":  `\x00-\x7F`,
+	"blank":  " \\t",
+	"cntrl":  `\x00-\x1F\x7F`,
+	"digit":  "0-9",
+	"graph":  `\x21-\x7E`,
+	"lower":  "a-z",
+	"print":  `\x20-\x7E `,
+	"punct":  `\-!"#$%&'()\*+,./:;<=>?@[\]^_` + "`" + `{|}~`,
+	"space":  " \\t\\r\\n\\v\\f",
+	"upper":  "A-Z",
+	"word":   "A-Za-z0-9_",
+	"xdigit": "A-Fa-f0-9",
+}
+
+// posixSource is the lookup at parse.js:728, keyed exactly.
+//
+// The name is compared as code units rather than through units.String: that
+// conversion folds an unpaired surrogate to U+FFFD (DECISIONS.md §10), and a map
+// inside this package has no reason to inherit the loss. Every key is ASCII, so
+// anything holding a unit above 0x7F cannot be one and is rejected without
+// converting at all.
+func posixSource(name units) (string, bool) {
+	b := make([]byte, len(name))
+	for i, c := range name {
+		if c > 0x7F {
+			return "", false
+		}
+		b[i] = byte(c)
+	}
+	// parse.js:729 tests `if (posix)`, so an empty source would be skipped as
+	// falsy. None of the fourteen is empty; the test is kept anyway because it
+	// is the shape upstream wrote.
+	src, ok := posixRegexSource[string(b)]
+	return src, ok && src != ""
 }
 
 // token is the mutable form of [Token]. Upstream rewrites tokens after pushing
@@ -63,6 +181,16 @@ type token struct {
 	tokensIndex *int
 	suffix      *units
 
+	// dots marks a brace token whose body contained "..", set by the dots arm at
+	// parse.js:1004 on the open brace rather than on the dots token itself.
+	//
+	// It is not exported. Every other field on [Token] appears in
+	// testdata/tokens/summary.json under "tokenFields" and this one does not,
+	// because the brace it is set on is popped by the "}" arm before the parse
+	// ends — the only way it survives is an unclosed "{a..b", which no corpus
+	// pattern has. suffix is unexported for the same reason.
+	dots bool
+
 	prev *token
 }
 
@@ -74,13 +202,30 @@ type scanner struct {
 	output   units
 	prefix   string
 
-	backtrack bool
-	negated   bool
+	backtrack      bool
+	negated        bool
+	globstar       bool
+	negatedExtglob bool
 
 	brackets int
 	braces   int
 	parens   int
 	quotes   int
+
+	// stack is upstream's `stack` array (parse.js:435), maintained by
+	// increment/decrement alongside the counters. Its one reader is the comma
+	// branch at :962, which needs the *innermost* open construct to be a brace —
+	// state.braces alone would also count a brace two levels out.
+	stack []string
+	// extglobs is upstream's `extglobs` array (parse.js:433), the stack of open
+	// !( +( *( ?( constructs.
+	extglobs []*extglob
+	// braceStack is upstream's `braces` array (parse.js:434), the stack of open
+	// "{" *tokens*. It holds the tokens themselves rather than a parallel record
+	// because upstream stores the brace's state on the token — comma at :963,
+	// dots at :1004, outputIndex and tokensIndex at :888-889 — and the "}" arm
+	// reads all four back off the same object it pushed.
+	braceStack []*token
 
 	tokens []*token
 	bos    *token
@@ -104,8 +249,14 @@ func newScanner(pattern string) (*scanner, error) {
 			return nil, &LengthError{Length: n, Max: maxLength}
 		}
 	}
-	input := encode(pattern)
+	return newScannerUnits(encode(pattern)), nil
+}
 
+// newScannerUnits is everything parse() does between the length guard and the
+// loop. It is separate from newScanner because parse() calls itself at
+// parse.js:588 with a slice of its own input, which is already units — see
+// parseSuffix on why the two skipped steps cannot fire there.
+func newScannerUnits(input units) *scanner {
 	// parse.js:371. bos carries output "" rather than no output — opts.prepend
 	// defaults to the empty string, and the recording shows the field present.
 	empty := units{}
@@ -121,7 +272,7 @@ func newScanner(pattern string) (*scanner, error) {
 		s.prefix = "./"
 	}
 	s.input = input
-	return s, nil
+	return s
 }
 
 // --- tokenizing helpers (parse.js:443-455) ---------------------------------
@@ -216,17 +367,75 @@ func (s *scanner) negate() {
 	s.start++
 }
 
+// increment and decrement are parse.js:475-483. The counter and the stack move
+// together, and decrement is called unguarded from the ")" branch at :806 —
+// state.parens goes negative there, and JavaScript's [].pop() on the empty stack
+// is a no-op rather than an error.
+func (s *scanner) increment(typ string) {
+	switch typ {
+	case "brackets":
+		s.brackets++
+	case "braces":
+		s.braces++
+	case "parens":
+		s.parens++
+	}
+	s.stack = append(s.stack, typ)
+}
+
+func (s *scanner) decrement(typ string) {
+	switch typ {
+	case "brackets":
+		s.brackets--
+	case "braces":
+		s.braces--
+	case "parens":
+		s.parens--
+	}
+	if len(s.stack) > 0 {
+		s.stack = s.stack[:len(s.stack)-1]
+	}
+}
+
 // push adds a token, merging consecutive text. parse.js:493-521.
 func (s *scanner) push(t *token) {
-	// parse.js:494-505 rewrites a preceding globstar back to a star. Not
-	// transcribed: no branch here produces a globstar token yet, so the code
-	// would be unreachable and untested. The star branch adds it.
+	// parse.js:494-505. A globstar is only a globstar until something that is
+	// not a separator follows it: pushing anything else rewrites it back into a
+	// plain star and un-emits the globstar body from state.output. This is the
+	// port's first retroactive rewrite that also *shrinks* a token — prev.value
+	// is assigned "*", not appended to, so a token that had grown to "**" goes
+	// back to one character while state.consumed keeps both. Trap #12.
 	if s.prev != nil && s.prev.typ == "globstar" {
-		s.fail(&UnsupportedError{Construct: "globstar lookbehind", Site: "parse.js:494", Index: s.index})
-		return
+		// parse.js:495. increment("braces") runs before the "{" arm's push, so a
+		// brace token following a globstar always finds the counter already
+		// raised and is exempted from the rewrite.
+		isBrace := s.braces > 0 && (t.typ == "comma" || t.typ == "brace")
+		// parse.js:496. "pipe" is a type upstream never pushes — the pipe branch
+		// at :950 emits a "text" token — so the second disjunct only fires on a
+		// paren inside an open extglob. It is kept as upstream spells it.
+		isExtglob := t.extglob || (len(s.extglobs) > 0 && (t.typ == "pipe" || t.typ == "paren"))
+		if t.typ != "slash" && t.typ != "paren" && !isBrace && !isExtglob {
+			if s.prev.output == nil {
+				s.fail(&UnsupportedError{Construct: "globstar lookbehind on a token with no output", Site: "parse.js:499", Index: s.index})
+				return
+			}
+			// parse.js:499. dropLast is JavaScript's slice(0, -n), which empties
+			// the output when n is 0 rather than leaving it alone. Trap #7.
+			s.output = dropLast(s.output, len(*s.prev.output))
+			s.prev.typ = "star"
+			s.prev.value = encode("*")
+			s.prev.output = out(star)
+			s.output = append(s.output, *s.prev.output...)
+		}
 	}
-	// parse.js:507-509 accumulates into the innermost extglob. Unreachable
-	// while "(" is unsupported.
+	// parse.js:507-509. Every non-paren token pushed while an extglob is open
+	// accumulates into the innermost one, which is what extglobClose reads to
+	// decide whether the body contained a "/" or a "*". The value is copied here
+	// rather than aliased: push() grows token values in place afterwards.
+	if len(s.extglobs) > 0 && t.typ != "paren" {
+		e := s.extglobs[len(s.extglobs)-1]
+		e.inner = append(e.inner, t.value...)
+	}
 
 	// parse.js:511 — JavaScript truthiness: an empty value and an empty output
 	// both count as absent here.
@@ -263,15 +472,62 @@ func (s *scanner) push(t *token) {
 
 func (u units) appendUnits(v units) units { return append(u, v...) }
 
+// starGuard is the paired append at parse.js:1263-1281:
+//
+//	state.output += nodot;
+//	prev.output  += nodot;
+//
+// The token before a leading star is rewritten *after* it was emitted, which is
+// the first retroactive edit in the port and the reason push() seeds a text
+// token's output from a clone rather than aliasing its value. Appending in place
+// here would be the same hazard one level up — prev.output would grow into
+// whatever backing array it shares — so the previous output is copied before the
+// guard is appended. It runs at most twice per star, so the copy is not on any
+// hot path.
+//
+// prev.output is never absent at this site: the three arms that reach it are
+// bos, slash and dot, and all three carry an output. If some later branch makes
+// that untrue the answer is not the empty string — JavaScript's `undefined + x`
+// is the string "undefined" + x — so it refuses instead of guessing.
+func (s *scanner) starGuard(guard string) {
+	g := encode(guard)
+	s.output = append(s.output, g...)
+	if s.prev.output == nil {
+		s.fail(&UnsupportedError{Construct: "star guard on a token with no output", Site: "parse.js:1264", Index: s.index})
+		return
+	}
+	o := append(s.prev.output.clone(), g...)
+	s.prev.output = &o
+}
+
+// dropLast is JavaScript's `u.slice(0, -n)`, including the degenerate case that
+// makes it different from the sentence it appears to be.
+//
+// Upstream truncates state.output this way at five sites — parse.js:499, :861,
+// :1189, :1204 and :1232 — always as "drop the fragment I am about to replace".
+// When that fragment is the empty string, n is 0, JavaScript's -0 is 0, and the
+// call is slice(0, 0): the *whole* output is discarded. The Go reading
+// `u[:len(u)-n]` leaves it untouched instead, which is the opposite thing.
+// An empty output is not rare — 1,883 of the 10,558 recorded tokens carry one.
+// docs/transcription-traps.md #7.
+func dropLast(u units, n int) units {
+	if n <= 0 || n >= len(u) {
+		return u[:0]
+	}
+	return u[:len(u)-n]
+}
+
 func (s *scanner) fail(err error) {
 	if s.err == nil {
 		s.err = err
 	}
 }
 
-func (s *scanner) unsupported(construct, site string) error {
-	return &UnsupportedError{Construct: construct, Site: site, Index: s.index}
-}
+// The `unsupported` helper that built an [UnsupportedError] for a declined
+// construct is gone with the brace branch: no branch of the loop declines one
+// any more. The three remaining constructions of that type are the guards on a
+// token with no output, and each is written at its site rather than through a
+// helper, because each names a condition rather than a construct.
 
 func out(s string) *units {
 	u := encode(s)
@@ -339,13 +595,102 @@ func (s *scanner) run() error {
 				}
 				continue
 			}
-			return s.unsupported(`\ inside a character class`, "parse.js:707")
+
+			// parse.js:710. The branch ends without a continue: an escape
+			// inside a character class falls through to the body below,
+			// carrying the two-unit escaped value. Only the "!next" arm at
+			// :683 pushes a token while state.brackets is nonzero, and it can
+			// only fire on the last unit of the input, so prev stays the
+			// bracket token for as long as the body branch keeps running.
 		}
 
-		// Character class body. parse.js:718-758. Unreachable while "[" is
-		// unsupported, since nothing else increments state.brackets.
-		if s.brackets > 0 {
-			return s.unsupported("character class body", "parse.js:718")
+		// Character class body. parse.js:718-758.
+		//
+		// A "]" is a member rather than the close when nothing has been
+		// accumulated yet, which is why "[]" and "[^]" scan on rather than
+		// closing empty.
+		if s.brackets > 0 && (!isUnit(value, ']') || bracketJustOpened(s.prev.value)) {
+			// POSIX classes, parse.js:719-741. The test is `opts.posix !==
+			// false`, so this arm is live by default and only an explicit
+			// `posix: false` turns it off. The other reader of the same key,
+			// twenty lines down at :751, is `opts.posix === true` — one option,
+			// two default answers.
+			if isUnit(value, ':') { // opts.posix !== false
+				inner := sliceFrom(s.prev.value, 1)
+				if inner.contains('[') {
+					// parse.js:722. Set on the *outer* test, so a name that
+					// does not resolve — "[[:foo:]]" — still marks the token
+					// posix and still suppresses the "^" rewrite at :847.
+					s.prev.posix = true
+
+					if inner.contains(':') {
+						// idx cannot be -1: inner is prev.value from index 1,
+						// and it was just found to contain a "[", so the last
+						// one in prev.value is at index 1 or later.
+						idx := lastIndexOf(s.prev.value, '[', len(s.prev.value))
+						pre := s.prev.value[:idx]
+						// slice(idx + 2) steps over the "[" and the ":" that
+						// opened the class name.
+						rest := sliceFrom(s.prev.value, idx+2)
+
+						if posix, ok := posixSource(rest); ok {
+							// parse.js:730. The value is replaced, so it stops
+							// being the text state.output holds — which is why
+							// :731 sets backtrack and the output is rebuilt.
+							pv := append(pre.clone(), encode(posix)...)
+							s.prev.value = pv
+							s.backtrack = true
+
+							// parse.js:732. advance() steps over the "]" of
+							// ":]" and returns it to nobody: the unit is never
+							// appended to prev.value or to state.consumed.
+							//
+							// It is also the second place upstream's index can
+							// pass the end. eos() is an equality, so when the
+							// ":" is the last unit of the input this never
+							// returns: "[][:alpha:" hangs node. Same reasoning
+							// as the backslash collapse — there is no recorded
+							// behaviour to match and no fixture can hold one.
+							// DECISIONS.md §11.
+							if s.index+1 >= len(s.input) {
+								return &NonTerminatingError{Site: "parse.js:732", Index: s.index}
+							}
+							s.advance()
+
+							// parse.js:734. bos.output is "" by default, which
+							// is falsy, so !bos.output is true for an unset
+							// opts.prepend as well as for a missing field.
+							if (s.bos.output == nil || len(*s.bos.output) == 0) &&
+								len(s.tokens) > 1 && s.tokens[1] == s.prev {
+								s.bos.output = out(oneChar)
+							}
+							continue
+						}
+					}
+				}
+			}
+
+			// parse.js:743-745. Note "[" is left bare when a ":" follows it,
+			// which is what lets the POSIX arm above see "[[:" in prev.value.
+			if (isUnit(value, '[') && !s.peekIs(1, ':')) || (isUnit(value, '-') && s.peekIs(1, ']')) {
+				value = escapePrefix(value)
+			}
+
+			// parse.js:747-749.
+			if isUnit(value, ']') && bracketJustOpened(s.prev.value) {
+				value = escapePrefix(value)
+			}
+
+			// parse.js:751-753, opts.posix === true rewrites "[!" to "[^".
+			// Marked, not written.
+
+			// parse.js:755-756. The body accumulates onto the bracket token one
+			// value at a time and never pushes, so a body is mid-surrogate
+			// between iterations — the third of the three sites that force
+			// units over a Go string. DECISIONS.md §8.
+			s.prev.value = append(s.prev.value, value...)
+			s.emit(&token{value: value})
+			continue
 		}
 
 		// Quoted string body. parse.js:765-770.
@@ -368,45 +713,270 @@ func (s *scanner) run() error {
 
 		// Parentheses. parse.js:788-808.
 		if c == '(' {
-			return s.unsupported("(", "parse.js:788")
+			s.increment("parens")
+			s.push(&token{typ: "paren", value: value})
+			if s.err != nil {
+				return s.err
+			}
+			continue
 		}
 		if c == ')' {
-			return s.unsupported(")", "parse.js:794")
+			// parse.js:795, opts.strictBrackets throws here. Marked, not written.
+
+			// parse.js:800. The innermost extglob closes only at exactly one
+			// paren deeper than it opened at; anything else is a plain group.
+			if n := len(s.extglobs); n > 0 && s.parens == s.extglobs[n-1].parens+1 {
+				e := s.extglobs[n-1]
+				s.extglobs = s.extglobs[:n-1]
+				if err := s.extglobClose(e, value); err != nil {
+					return err
+				}
+				continue
+			}
+
+			// parse.js:805-806. state.parens is read for truthiness *before* the
+			// decrement, and the decrement is unguarded — an unmatched ")" takes
+			// the counter negative, which is truthy, so a second one emits ")"
+			// where the first emitted "\)".
+			output := `\)`
+			if s.parens != 0 {
+				output = `)`
+			}
+			s.push(&token{typ: "paren", value: value, output: out(output)})
+			if s.err != nil {
+				return s.err
+			}
+			s.decrement("parens")
+			continue
 		}
 
 		// Square brackets. parse.js:814-875.
 		if c == '[' {
-			return s.unsupported("[", "parse.js:814")
+			// parse.js:815. The test is whether a "]" appears anywhere in the
+			// rest of the input, not whether one *matches*: escaping and
+			// nesting are not considered, so "[a\]" opens a class that never
+			// closes and is patched by escapeLast after the loop.
+			if !s.remaining().contains(']') { // opts.nobracket
+				// parse.js:816-818, opts.strictBrackets throws here. Marked,
+				// not written.
+				value = escapePrefix(value)
+			} else {
+				s.increment("brackets")
+			}
+
+			s.push(&token{typ: "bracket", value: value})
+			if s.err != nil {
+				return s.err
+			}
+			continue
 		}
 		if c == ']' {
-			// prev.type == "bracket" is unreachable while "[" is unsupported,
-			// so this is always the state.brackets == 0 arm at parse.js:835.
-			if s.brackets == 0 {
+			// parse.js:830. The bracket-of-length-one arm is unreachable under
+			// default options: a "[" that incremented the counter pushes a
+			// one-unit value, but then state.brackets is nonzero and the body
+			// branch above claims the "]" first (prev.value === "["); a "[" that
+			// did not increment pushes the two-unit "\[". It is transcribed
+			// because opts.nobracket reaches it and because a guess about which
+			// arm is dead is not worth the line it saves.
+			if s.prev != nil && s.prev.typ == "bracket" && len(s.prev.value) == 1 { // opts.nobracket
 				s.push(&token{typ: "text", value: value, output: out(`\]`)})
 				if s.err != nil {
 					return s.err
 				}
 				continue
 			}
-			return s.unsupported("]", "parse.js:844")
+
+			if s.brackets == 0 {
+				// parse.js:836, opts.strictBrackets throws here. Marked, not
+				// written.
+				//
+				// The output is an *escaped* "]" where the matching arm for an
+				// unopened "}" at :901 emits a bare "}". The two branches are
+				// otherwise symmetrical and ninety lines apart. Trap #4.
+				s.push(&token{typ: "text", value: value, output: out(`\]`)})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			s.decrement("brackets")
+
+			// parse.js:846. Copied rather than sliced: prev.value is appended
+			// to two lines down, and prevValue is read after that.
+			prevValue := sliceFrom(s.prev.value, 1).clone()
+
+			// parse.js:847-849. A negated class gains a "/" member, and it goes
+			// into the token *value*, so state.consumed grows a unit the input
+			// never had: "[^a]" consumes "[^a/]". Trap #5's second mechanism.
+			if !s.prev.posix && len(prevValue) > 0 && prevValue[0] == '^' && !prevValue.contains('/') {
+				value = append(units{'/'}, value...)
+			}
+
+			s.prev.value = append(s.prev.value, value...)
+			s.emit(&token{value: value})
+
+			// parse.js:856. opts.literalBrackets === false takes this exit too.
+			// Marked, not written.
+			if hasRegexChars(prevValue) {
+				continue
+			}
+
+			escaped := escapeRegex(s.prev.value)
+
+			// parse.js:861, the fifth slice(0, -X.length) site and the only one
+			// that slices by a token *value* rather than by an output. n is at
+			// least 2 here — prev.value is "[" plus the "]" just appended — so
+			// unlike the four in trap #7 the degenerate -0 case cannot arise.
+			// The tail of state.output is not always prev.value either: the
+			// POSIX arm rewrites the value and leaves the emitted text alone,
+			// and this truncates by the wrong count. That is upstream's
+			// arithmetic and it is invisible, because the same arm set
+			// backtrack and the output is rebuilt at :1309.
+			s.output = dropLast(s.output, len(s.prev.value))
+
+			// parse.js:865-869, opts.literalBrackets === true. Marked, not
+			// written; the unset path is the one below.
+
+			// parse.js:872-873. With nothing specified, match both the literal
+			// text and the character class.
+			nv := encode(`(` + capture)
+			nv = append(nv, escaped...)
+			nv = append(nv, '|')
+			nv = append(nv, s.prev.value...)
+			nv = append(nv, ')')
+			s.prev.value = nv
+			s.output = append(s.output, nv...)
+			continue
 		}
 
 		// Braces. parse.js:881-940.
-		if c == '{' {
-			return s.unsupported("{", "parse.js:881")
-		}
-		if c == '}' {
-			// Always the "no open brace" arm at parse.js:900 while "{" is
-			// unsupported. Note the output is the literal "}", not an escape.
-			s.push(&token{typ: "text", value: value, output: out("}")})
+		if c == '{' { // opts.nobrace
+			s.increment("braces")
+
+			// parse.js:888-889. Both indexes are taken *before* the push, so
+			// they name the position this token is about to occupy and the
+			// output as it stood without it. outputIndex is the only one of its
+			// kind in the file — 18 recorded tokens carry it, every one as 0.
+			oi, ti := len(s.output), len(s.tokens)
+			open := &token{
+				typ:         "brace",
+				value:       value,
+				output:      out("("),
+				outputIndex: &oi,
+				tokensIndex: &ti,
+			}
+
+			s.braceStack = append(s.braceStack, open)
+			s.push(open)
 			if s.err != nil {
 				return s.err
 			}
 			continue
 		}
+		if c == '}' {
+			var brace *token
+			if n := len(s.braceStack); n > 0 {
+				brace = s.braceStack[n-1]
+			}
 
-		// Pipes. parse.js:946-952.
+			// parse.js:900. A "}" with nothing open emits the literal "}",
+			// where the matching arm for an unopened "]" at :840 emits "\]".
+			// The two branches are otherwise symmetrical and ninety lines
+			// apart. Trap #4.
+			if brace == nil { // opts.nobrace
+				s.push(&token{typ: "text", value: value, output: out("}")})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			output := encode(")")
+
+			// parse.js:907-923. A "{a..b}" range: unwind the tokens back to the
+			// brace, collect their values, and replace the lot with a character
+			// class. The pop is unconditional and runs *before* the type test,
+			// so the brace token is removed too — which is why no recorded token
+			// ever carries the `dots` flag this arm reads.
+			if brace.dots {
+				arr := append([]*token(nil), s.tokens...)
+				var rng []units
+				for i := len(arr) - 1; i >= 0; i-- {
+					s.tokens = s.tokens[:len(s.tokens)-1]
+					if arr[i].typ == "brace" {
+						break
+					}
+					if arr[i].typ != "dots" {
+						rng = append([]units{arr[i].value}, rng...)
+					}
+				}
+
+				// s.prev is deliberately left pointing at a token that is no
+				// longer in the list: upstream pops from `tokens` and never
+				// reassigns `prev`, so the push below reads the popped token for
+				// its globstar lookbehind and links the new brace to it.
+				output = expandRange(rng)
+				s.backtrack = true
+			}
+
+			// parse.js:925-934. A brace with neither a comma nor a range was
+			// never an alternation, so both delimiters become literal and the
+			// output is rebuilt from the brace's own outputIndex — the deepest
+			// rewrite in the file after extglobClose's, and like that one it is
+			// not decided until the closing character.
+			if !brace.comma && !brace.dots {
+				// slice(0, n) clamps rather than panicking, and n can exceed the
+				// output: the globstar arms and extglobClose both *assign*
+				// state.output, so it can be shorter than it was at the "{".
+				oi := *brace.outputIndex
+				if oi > len(s.output) {
+					oi = len(s.output)
+				}
+				ti := *brace.tokensIndex
+				if ti > len(s.tokens) {
+					ti = len(s.tokens)
+				}
+				toks := append([]*token(nil), s.tokens[ti:]...)
+
+				brace.value = encode(`\{`)
+				brace.output = out(`\{`)
+				value = encode(`\}`)
+				output = encode(`\}`)
+
+				// Cloned rather than resliced: appending into s.output's spare
+				// capacity would write past the prefix that is being kept, and
+				// the replay below appends immediately.
+				s.output = s.output[:oi].clone()
+				for _, t := range toks {
+					// parse.js:932 is `t.output || t.value` — JavaScript
+					// truthiness, so an *empty* output falls back to the value.
+					// The post-loop rebuild at :1313 spells the same fallback as
+					// `!= null` and keeps the empty string. Two replays, two
+					// different rules, ninety lines apart.
+					if t.output != nil && len(*t.output) > 0 {
+						s.output = append(s.output, *t.output...)
+					} else {
+						s.output = append(s.output, t.value...)
+					}
+				}
+			}
+
+			s.push(&token{typ: "brace", value: value, output: &output})
+			if s.err != nil {
+				return s.err
+			}
+			s.decrement("braces")
+			s.braceStack = s.braceStack[:len(s.braceStack)-1]
+			continue
+		}
+
+		// Pipes. parse.js:946-952. Note the token type is "text", not "pipe" —
+		// "pipe" is named in two lookbehinds (:496, :1162) and pushed nowhere.
 		if c == '|' {
+			if n := len(s.extglobs); n > 0 {
+				s.extglobs[n-1].conditions++
+			}
 			s.push(&token{typ: "text", value: value})
 			if s.err != nil {
 				return s.err
@@ -417,7 +987,18 @@ func (s *scanner) run() error {
 		// Commas. parse.js:958-969. Outside braces the output is the comma
 		// itself; inside, it becomes the alternation bar.
 		if c == ',' {
-			s.push(&token{typ: "comma", value: value, output: out(",")})
+			output := value.clone()
+
+			// parse.js:961-962. Two tests, not one: a brace must be open *and*
+			// be the innermost open construct. "{a(b,c)}" has state.braces at 1
+			// and "parens" on top of the stack, so its comma stays a comma.
+			// This is the only reader of `stack` in the file.
+			if n := len(s.braceStack); n > 0 && len(s.stack) > 0 && s.stack[len(s.stack)-1] == "braces" {
+				s.braceStack[n-1].comma = true
+				output = encode("|")
+			}
+
+			s.push(&token{typ: "comma", value: value, output: &output})
 			if s.err != nil {
 				return s.err
 			}
@@ -447,8 +1028,36 @@ func (s *scanner) run() error {
 
 		// Dots. parse.js:997-1015.
 		if c == '.' {
-			// parse.js:998-1006 handles ".." inside braces. Unreachable while
-			// "{" is unsupported.
+			// parse.js:998-1006. A second dot inside a brace turns the first
+			// one's token into a "dots" — a type that exists only between here
+			// and the closing "}", which pops it.
+			//
+			// The test is prev.type === "dot", not "dots", so a third dot does
+			// not extend the range: "{a...b}" is a dots token and then a dot.
+			if s.braces > 0 && s.prev.typ == "dot" {
+				// parse.js:999. A dot token is pushed with DOT_LITERAL already,
+				// so this only matters where something has since rewritten the
+				// output — starGuard (:1264) appends the dot guard to a prev of
+				// type "dot".
+				if isUnit(s.prev.value, '.') {
+					s.prev.output = out(dotLiteral)
+				}
+				if s.prev.output == nil {
+					// JavaScript's `undefined + "."` is the string "undefined.",
+					// not "."; there is nothing sensible to guess. Every pusher
+					// of a "dot" token gives it an output, so this cannot fire.
+					s.fail(&UnsupportedError{Construct: "brace range on a dot token with no output", Site: "parse.js:1002", Index: s.index})
+					return s.err
+				}
+				brace := s.braceStack[len(s.braceStack)-1]
+				s.prev.typ = "dots"
+				po := append(s.prev.output.clone(), value...)
+				s.prev.output = &po
+				s.prev.value = append(s.prev.value, value...)
+				brace.dots = true
+				continue
+			}
+
 			if s.braces+s.parens == 0 && s.prev.typ != "bos" && s.prev.typ != "slash" {
 				s.push(&token{typ: "text", value: value, output: out(dotLiteral)})
 				if s.err != nil {
@@ -463,9 +1072,68 @@ func (s *scanner) run() error {
 			continue
 		}
 
-		// Question marks. parse.js:1021-1048.
+		// Question marks. parse.js:1021-1047. Four arms, and the first three
+		// test three different things about the same token: :1022 reads
+		// prev.value, :1028 and :1040 read prev.type.
 		if c == '?' {
-			return s.unsupported("?", "parse.js:1021")
+			isGroup := s.prev != nil && s.prev.value.equal(encode("("))
+			if !isGroup && s.peekIs(1, '(') && !s.peekIs(2, '?') { // opts.noextglob
+				s.extglobOpen("qmark", value)
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			// parse.js:1028-1038. Directly after a paren token the "?" is part
+			// of the group's own syntax rather than a glob, so it is emitted
+			// bare — unless doing so would open a group upstream does not mean,
+			// in which case it is escaped. The token type is "text", not
+			// "qmark", so it merges with adjacent text.
+			if s.prev != nil && s.prev.typ == "paren" {
+				next, hasNext := s.peek(1)
+				output := value.clone()
+
+				// parse.js:1032. Both halves are regexp tests on values that
+				// can be undefined, and JavaScript coerces before testing:
+				// /[!=<:]/.test(undefined) tests the string "undefined", which
+				// contains none of them, so a "?" that ends the input after a
+				// "(" takes the escape. The second half is a *search* over the
+				// whole of remaining(), not a test of the two units after the
+				// "<".
+				if (s.prev.value.equal(encode("(")) && !isLookaroundIntro(next, hasNext)) ||
+					(hasNext && next == '<' && !hasAngleGroupIntro(s.remaining())) {
+					output = escapePrefix(value)
+				}
+
+				s.push(&token{typ: "text", value: value, output: &output})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			// parse.js:1040-1043. A "?" that opens a path segment must not
+			// match a leading dot, and the guard is a class that excludes both
+			// the dot and the separator rather than a lookahead in front of
+			// QMARK.
+			if s.prev.typ == "slash" || s.prev.typ == "bos" { // opts.dot
+				s.push(&token{typ: "qmark", value: value, output: out(qmarkNoDot)})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			// parse.js:1045. QMARK is `[^/]` — exactly one UTF-16 code unit, so
+			// an astral character is matched by two "?" and not by one. The
+			// second of the three sites that force units over a Go string, and
+			// the one no fixture in testdata/original can see. DECISIONS.md §8.
+			s.push(&token{typ: "qmark", value: value, output: out(qmark)})
+			if s.err != nil {
+				return s.err
+			}
+			continue
 		}
 
 		// Exclamation. parse.js:1053-1065. Neither arm is a fallthrough guard:
@@ -474,7 +1142,11 @@ func (s *scanner) run() error {
 		if c == '!' {
 			if s.peekIs(1, '(') { // opts.noextglob
 				if !s.peekIs(2, '?') || !isLookaroundIntro(s.peek(3)) {
-					return s.unsupported("!( extglob", "parse.js:1056")
+					s.extglobOpen("negate", value)
+					if s.err != nil {
+						return s.err
+					}
+					continue
 				}
 			}
 			if s.index == 0 { // opts.nonegate
@@ -483,15 +1155,31 @@ func (s *scanner) run() error {
 			}
 		}
 
-		// Plus. parse.js:1071-1089.
+		// Plus. parse.js:1071-1089. Three arms, three shapes: the first sets
+		// value and output, the second neither, and the third puts the escape in
+		// value and sets no output at all. Trap #3.
 		if c == '+' {
 			if s.peekIs(1, '(') && !s.peekIs(2, '?') { // opts.noextglob
-				return s.unsupported("+( extglob", "parse.js:1073")
+				s.extglobOpen("plus", value)
+				if s.err != nil {
+					return s.err
+				}
+				continue
 			}
-			// The two arms at parse.js:1077 and :1082 need a preceding paren,
-			// bracket or brace token, none of which exist yet. This is the
-			// bare-plus arm at :1087 — note the escape lands in value, and the
-			// token has no output at all.
+			if s.prev != nil && s.prev.value.equal(encode("(")) { // opts.regex === false
+				s.push(&token{typ: "plus", value: value, output: out(plusLiteral)})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+			if (s.prev != nil && (s.prev.typ == "bracket" || s.prev.typ == "paren" || s.prev.typ == "brace")) || s.parens > 0 {
+				s.push(&token{typ: "plus", value: value})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
 			s.push(&token{typ: "plus", value: encode(plusLiteral)})
 			if s.err != nil {
 				return s.err
@@ -534,19 +1222,251 @@ func (s *scanner) run() error {
 		}
 
 		// Stars. parse.js:1128-1283.
-		return s.unsupported("*", "parse.js:1128")
+
+		// parse.js:1128-1137 folds a star into a preceding globstar, or into a
+		// token an earlier star was already folded into. It is the only site in
+		// parse() that sets state.backtrack, and therefore the only thing that
+		// makes the post-loop rebuild at :1309-1319 run.
+		if s.prev != nil && (s.prev.typ == "globstar" || s.prev.star) {
+			s.prev.typ = "star"
+			s.prev.star = true
+			s.prev.value = append(s.prev.value, value...)
+			s.prev.output = out(star)
+			s.backtrack = true
+			s.globstar = true
+			s.consume(value, 0)
+			continue
+		}
+
+		rest := s.remaining()
+
+		// parse.js:1140, /^\([^?]/ — "*(" opens an extglob. opts.noextglob.
+		// Note this is spelled differently from its four siblings: it needs two
+		// characters, so a trailing "*(" falls through to the globstar arms
+		// where "+(" at the end of input still opens.
+		if isExtglobOpen(rest) {
+			s.extglobOpen("star", value)
+			if s.err != nil {
+				return s.err
+			}
+			continue
+		}
+
+		// parse.js:1145-1244, the globstar arms. Every one of them rewrites the
+		// star token that is already on the stack rather than pushing a new one,
+		// so `prev` here is the first star of the pair and `value` is the second.
+		if s.prev.typ == "star" {
+			// parse.js:1146, opts.noglobstar: consume the second star and emit
+			// nothing. Marked, not written.
+
+			// parse.js:1151-1154. prior is two tokens back — the token before
+			// the first star — and `before` is three. Neither lookup can be nil
+			// here: prev is a pushed token so it carries prev, and prior is only
+			// dereferenced further down behind a `prior.type === "slash"` test,
+			// which excludes bos, the one token whose prev is nil.
+			prior := s.prev.prev
+			before := prior.prev
+			isStart := prior.typ == "slash" || prior.typ == "bos"
+			afterStar := before != nil && (before.typ == "star" || before.typ == "globstar")
+
+			// parse.js:1156, opts.bash. Marked, not written.
+
+			// parse.js:1161-1166. A star that does not start a path segment
+			// stays a plain star, and its token carries an output that is
+			// present and *empty* rather than absent — it is still pushed, and
+			// push() still consumes its value. Trap #21.
+			//
+			// isExtglob (:1162) tests prior.type against "pipe", a type upstream
+			// never pushes, so only the "paren" half can fire — and prior.type
+			// !== "paren" is already tested beside it.
+			isBrace := s.braces > 0 && (prior.typ == "comma" || prior.typ == "brace")
+			isExtglob := len(s.extglobs) > 0 && (prior.typ == "pipe" || prior.typ == "paren")
+			if !isStart && prior.typ != "paren" && !isBrace && !isExtglob {
+				s.push(&token{typ: "star", value: value, output: out("")})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			// parse.js:1168-1176, strip consecutive "/**". consume's second
+			// argument advances the index past the three units this accounts
+			// for; it is the one call site of the nine that passes it (trap #6).
+			for len(rest) >= 3 && rest[0] == '/' && rest[1] == '*' && rest[2] == '*' {
+				// parse.js:1170 peeks index+4, not index+3. rest is
+				// remaining(), which already starts at index+1, so the unit
+				// after the three matched here sits four ahead of the index.
+				// Trap #8.
+				if after, ok := s.peek(4); ok && after != '/' {
+					break
+				}
+				rest = rest[3:]
+				s.consume(encode("/**"), 3)
+			}
+
+			// parse.js:1178-1186. A whole-pattern "**": state.output is
+			// *assigned*, not appended to, so the leading dot guard the star
+			// branch already wrote is dropped from the output while bos keeps
+			// it. Trap #18.
+			if prior.typ == "bos" && s.eos() {
+				s.prev.typ = "globstar"
+				s.prev.value = append(s.prev.value, value...)
+				s.prev.output = out(globstarBody)
+				s.output = s.prev.output.clone()
+				s.globstar = true
+				s.consume(value, 0)
+				continue
+			}
+
+			// parse.js:1188-1199, a trailing "/**".
+			if prior.typ == "slash" && prior.prev.typ != "bos" && !afterStar && s.eos() {
+				// parse.js:1189. The truncation is by the sum of *two* token
+				// outputs, and prior.output is read here before :1190 rewrites
+				// it. Trap #19.
+				s.output = dropLast(s.output, len(*prior.output)+len(*s.prev.output))
+				// Built on units rather than through String(): the boundary
+				// conversion folds an unpaired surrogate to U+FFFD, and prior's
+				// output is not the scanner's to launder. DECISIONS.md §10.
+				po := append(encode(`(?:`), *prior.output...)
+				prior.output = &po
+
+				s.prev.typ = "globstar"
+				// opts.strictSlashes emits ")" in place of "|$)".
+				s.prev.output = out(globstarBody + `|$)`)
+				s.prev.value = append(s.prev.value, value...)
+				s.globstar = true
+				s.output = append(s.output, *prior.output...)
+				s.output = append(s.output, *s.prev.output...)
+				s.consume(value, 0)
+				continue
+			}
+
+			// parse.js:1201-1218, a "/**/" in the middle of a pattern.
+			if prior.typ == "slash" && prior.prev.typ != "bos" && len(rest) > 0 && rest[0] == '/' {
+				end := ""
+				if len(rest) > 1 { // rest[1] !== void 0
+					end = `|$`
+				}
+
+				s.output = dropLast(s.output, len(*prior.output)+len(*s.prev.output))
+				// Built on units rather than through String(): the boundary
+				// conversion folds an unpaired surrogate to U+FFFD, and prior's
+				// output is not the scanner's to launder. DECISIONS.md §10.
+				po := append(encode(`(?:`), *prior.output...)
+				prior.output = &po
+
+				s.prev.typ = "globstar"
+				s.prev.output = out(globstarBody + slashLiteral + `|` + slashLiteral + end + `)`)
+				s.prev.value = append(s.prev.value, value...)
+
+				s.output = append(s.output, *prior.output...)
+				s.output = append(s.output, *s.prev.output...)
+				s.globstar = true
+
+				// parse.js:1214. The slash is consumed here *and* again by the
+				// push below, which is how state.consumed grows a slash the
+				// input never had: "a/**/b" consumes "a/**//b". Trap #5.
+				slash := s.advance()
+				s.consume(append(value.clone(), slash), 0)
+
+				s.push(&token{typ: "slash", value: encode("/"), output: out("")})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			// parse.js:1220-1229, a leading "**/".
+			if prior.typ == "bos" && len(rest) > 0 && rest[0] == '/' {
+				s.prev.typ = "globstar"
+				s.prev.value = append(s.prev.value, value...)
+				s.prev.output = out(`(?:^|` + slashLiteral + `|` + globstarBody + slashLiteral + `)`)
+				s.output = s.prev.output.clone() // assigned, not appended — trap #18
+				s.globstar = true
+
+				slash := s.advance()
+				s.consume(append(value.clone(), slash), 0)
+
+				s.push(&token{typ: "slash", value: encode("/"), output: out("")})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
+
+			// parse.js:1231-1243. Remove the single star from the output and
+			// put the globstar body in its place.
+			s.output = dropLast(s.output, len(*s.prev.output))
+			s.prev.typ = "globstar"
+			s.prev.output = out(globstarBody)
+			s.prev.value = append(s.prev.value, value...)
+			s.output = append(s.output, *s.prev.output...)
+			s.globstar = true
+			s.consume(value, 0)
+			continue
+		}
+
+		// parse.js:1246. out() encodes a fresh slice per call; a shared package
+		// slice would be appended to in place by the guard below.
+		tok := &token{typ: "star", value: value, output: out(star)}
+
+		// parse.js:1248 (opts.bash) and :1257 (opts.regex === false with a
+		// bracket or paren prev) cannot be reached under default options. Both
+		// prev.types now exist, so the sites are live the moment options are
+		// threaded through. Marked, not written.
+
+		// parse.js:1263. The test is state.index === state.start, not === 0:
+		// start moves past a negation prologue and past a "./" that survived
+		// behind one, so "!*" and "!./*" take this arm at index 1 and 3.
+		if s.index == s.start || s.prev.typ == "slash" || s.prev.typ == "dot" {
+			guard := nodot // opts.dot selects noDotsSlash at parse.js:1270
+			if s.prev.typ == "dot" {
+				guard = noDotSlash
+			}
+			s.starGuard(guard)
+
+			// parse.js:1279. peek() is the unit after the star, so "**"
+			// suppresses the one-character guard even though the second star is
+			// not consumed here.
+			if !s.peekIs(1, '*') {
+				s.starGuard(oneChar)
+			}
+		}
+
+		// parse.js:1283.
+		s.push(tok)
+		if s.err != nil {
+			return s.err
+		}
 	}
 
 	if s.err != nil {
 		return s.err
 	}
 
-	// Unclosed brackets, parens and braces. parse.js:1286-1302. All three
-	// counters are pinned at zero while their opening characters are
-	// unsupported, so escapeLast has nothing to rewrite yet.
+	// Unclosed brackets, parens and braces. parse.js:1286-1302. All three loops
+	// are live. opts.strictBrackets throws in each instead — marked, not
+	// written.
+	//
+	// The brace loop does not pop braceStack, exactly as upstream does not pop
+	// `braces`: the scan is over and nothing reads either again.
+	for s.brackets > 0 {
+		s.output = escapeLast(s.output, '[', len(s.output))
+		s.decrement("brackets")
+	}
 
-	// parse.js:1304-1306, opts.strictSlashes. Unreachable until the star and
-	// bracket branches land, which are the only producers of those types.
+	for s.parens > 0 {
+		s.output = escapeLast(s.output, '(', len(s.output))
+		s.decrement("parens")
+	}
+
+	for s.braces > 0 {
+		s.output = escapeLast(s.output, '{', len(s.output))
+		s.decrement("braces")
+	}
+
+	// parse.js:1304-1306, opts.strictSlashes. Both producers of those types are
+	// now built, so both arms are live.
 	if s.prev.typ == "star" || s.prev.typ == "bracket" {
 		s.push(&token{typ: "maybe_slash", value: units{}, output: out(slashLiteral + "?")})
 		if s.err != nil {
@@ -574,6 +1494,22 @@ func (s *scanner) run() error {
 	return nil
 }
 
+// bracketJustOpened is `prev.value === '[' || prev.value === '[^'`, the test
+// spelled twice in the character-class body (parse.js:718 and :747).
+//
+// It is what makes a "]" the first member of an empty class rather than its
+// close, so "[]]" is one bracket token holding "[\]]" and not a class followed
+// by stray text.
+func bracketJustOpened(u units) bool {
+	return isUnit(u, '[') || (len(u) == 2 && u[0] == '[' && u[1] == '^')
+}
+
+// isExtglobOpen is the /^\([^?]/ test at parse.js:1140, applied to remaining().
+// It needs two units, so a trailing "(" does not match it.
+func isExtglobOpen(rest units) bool {
+	return len(rest) >= 2 && rest[0] == '(' && rest[1] != '?'
+}
+
 // isLookaroundIntro is the /[!=<:]/ test at parse.js:1055, which distinguishes
 // "!(?!" and friends from a plain "!(?".
 func isLookaroundIntro(c uint16, ok bool) bool {
@@ -587,15 +1523,79 @@ func isLookaroundIntro(c uint16, ok bool) bool {
 	return false
 }
 
-func (s *scanner) export() *State {
-	st := &State{
-		Consumed:  s.consumed.String(),
-		Output:    s.output.String(),
-		Negated:   s.negated,
-		Backtrack: s.backtrack,
-		Tokens:    make([]Token, 0, len(s.tokens)),
+// hasAngleGroupIntro is the /<([!=]|\w+>)/ test at parse.js:1032, applied to
+// remaining().
+//
+// It is the second, wider half of that line's pair; isLookaroundIntro above is
+// the first. Three things about it do not survive being paraphrased:
+//
+//   - it is a *search*, not an anchored test. The caller has already
+//     established that remaining() starts with "<", so the natural reading is
+//     "is this a lookbehind or a named group" — but the regexp is unanchored,
+//     so a "<...>" anywhere later in the pattern satisfies it just as well.
+//   - "\w" in a non-unicode JavaScript regexp is exactly [A-Za-z0-9_]. It is
+//     not Unicode-aware, so it is a unit test rather than a rune test.
+//   - "\w+" is greedy with backtracking, but only the maximal run can be
+//     followed by ">": a shorter run would have to be followed by a word
+//     character. So one forward scan per "<" is the whole of it.
+func hasAngleGroupIntro(u units) bool {
+	for i := 0; i < len(u); i++ {
+		if u[i] != '<' {
+			continue
+		}
+		if i+1 < len(u) && (u[i+1] == '!' || u[i+1] == '=') {
+			return true
+		}
+		j := i + 1
+		for j < len(u) && isWordUnit(u[j]) {
+			j++
+		}
+		if j > i+1 && j < len(u) && u[j] == '>' {
+			return true
+		}
 	}
-	for _, t := range s.tokens {
+	return false
+}
+
+// isWordUnit is JavaScript's \w without the /u flag: [A-Za-z0-9_], ASCII only.
+func isWordUnit(c uint16) bool {
+	return c == '_' ||
+		(c >= '0' && c <= '9') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= 'a' && c <= 'z')
+}
+
+// prefixTokens is gone with the brace branch, and its removal is the prediction
+// DECISIONS.md §14 made rather than an unrelated tidy-up.
+//
+// It truncated a *declined* parse back to the last open "+(" or "*(", because
+// extglobClose's risky path (parse.js:544-566) can rewrite every token from
+// there onwards and does not decide until the closing ")". That mattered only
+// while some construct inside an extglob body could still decline. With "{"
+// built there is none: no branch of the loop returns an UnsupportedError for a
+// construct any more, so no parse can stop mid-extglob and there is nothing
+// unsettled to hand back.
+//
+// The three UnsupportedErrors left in this file are guards on a token that has
+// no output — push()'s globstar lookbehind at parse.js:499, starGuard at :1264,
+// and the brace-range arm at :1002 — and all three are unreachable: every token
+// type any of those arms can meet carries an output. They are kept because a
+// guess about which arm is dead is not worth the line it saves, not because a
+// construct is missing. (extglob.go re-wraps an error from the recursive parse
+// at :588, which can no longer produce one; it constructs nothing new.)
+func (s *scanner) export() *State { return s.exportTokens(s.tokens) }
+
+func (s *scanner) exportTokens(toks []*token) *State {
+	st := &State{
+		Consumed:       s.consumed.String(),
+		Output:         s.output.String(),
+		Negated:        s.negated,
+		Backtrack:      s.backtrack,
+		Globstar:       s.globstar,
+		NegatedExtglob: s.negatedExtglob,
+		Tokens:         make([]Token, 0, len(toks)),
+	}
+	for _, t := range toks {
 		st.Tokens = append(st.Tokens, t.export())
 	}
 	return st

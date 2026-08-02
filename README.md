@@ -7,17 +7,22 @@ ecosystem.
 **Port Mortem 2026 · Track F (JavaScript → Go)**
 
 > **Status: scaffolding.** The matcher is not implemented yet — every entry point
-> returns `ErrNotImplemented` and behavioural parity is **0.01%** (2 of 19,308
-> replayable cases, both `assert.throws` fixtures the empty-pattern guard already
-> satisfies). `ErrNotImplemented` is scored as a *failure*, never as a match for a
-> recorded throw, so that figure can only move for real reasons. What *is* built is
-> the machinery that makes the parity claim checkable: the upstream test suite,
-> vendored byte-for-byte and hash-pinned, and a pipeline that records what
-> picomatch actually does while that suite runs.
+> that reaches it returns `ErrNotImplemented`, and behavioural parity is **3.13%**
+> (588 passed of 18,790 comparable, from 19,308 replayable cases less 518 the port
+> declares out of scope). `ErrNotImplemented` is scored as a *failure*, never as a
+> match for a recorded throw, so that figure can only move for real reasons. What
+> *is* built is the machinery that makes the parity claim checkable: the upstream
+> test suite, vendored byte-for-byte and hash-pinned, and a pipeline that records
+> what picomatch actually does while that suite runs.
+>
+> Of those 588, **586** are `lib/scan.js` — a second upstream entry point with its
+> own state machine, ported in full, at 100% of its recorded cases. The other 2 are
+> the `assert.throws` fixtures the empty-pattern guard already satisfies. Scan does
+> not touch the matcher, so none of it is credit against the 15,060 `isMatch` cases.
 >
 > The scanner is underway behind that machinery and has its own number —
-> `make tokens` reads **11.80%**, and parity cannot move until it, the emitter and
-> the matcher are all finished.
+> `make tokens` reads **29.58%** with `0 wrong`, and matcher parity cannot move
+> until it, the emitter and the matcher are all finished.
 
 ---
 
@@ -151,14 +156,17 @@ make tokens           # report only
 make tokens-fixture   # re-record from upstream (needs Node)
 ```
 
-It currently reads **11.80%** — 176 of 1,491 patterns. The scanner handles literal
-text, slashes, dots, escapes, quotes and the leading-negation prologue; `*`, `?`,
-brackets, braces, parens and extglobs are not built yet.
+It now reads **100.00%** — 1,491 of 1,491 patterns, with `0 unbuilt` and
+`0 wrong`. Under default options the scanner is complete: literal text, slashes,
+dots, escapes, quotes, the leading-negation prologue, stars, globstars, extglobs,
+brackets, braces and `?` are all built, and no input is declined.
 
 The percentage is the less useful of the two numbers it prints. Every failure is
 classified as either **unbuilt** — the scanner reached a construct it does not
 implement and refused — or **wrong**, meaning a branch that already exists
-disagreed with the recording:
+disagreed with the recording. While branches were landing the report also named
+what each failure was blocked on, which gave the build order without anyone
+having to choose one:
 
 ```
 of 1315 failures: 1315 unbuilt, 0 wrong
@@ -167,19 +175,21 @@ blocked on !( extglob (parse.js:1056) 145
 blocked on [ (parse.js:814)           140
 ```
 
-Unbuilt is expected and shrinks on its own as branches land. Wrong is not
-supposed to be nonzero at any point, so it fails the run rather than lowering a
-score — unlike the percentage floor, that check is not opt-in, and CI runs the
-gate as its own step. The same table gives the build order without anyone having
-to choose one.
+Both columns are now zero and that table is empty. Unbuilt was expected and shrank
+on its own as branches landed. Wrong was never supposed to be nonzero at any
+point, so it fails the run rather than lowering a score — unlike the percentage
+floor, that check is not opt-in, and CI runs the gate as its own step. It stayed
+at `0` through every stage.
 
-`0 wrong` is not a claim about the 176 patterns that parse end to end. A pattern
-the scanner declines still returns the tokens it produced first, and those are
-compared against the recording's leading tokens — so a bug in a branch that
-exists is reported as wrong even when the same pattern trips on something unbuilt
-further along. One token is exempt: upstream rewrites tokens after pushing them,
-always the one immediately before, so the token adjacent to the construct that
-stopped the scanner is not yet final. DECISIONS.md §9 has the measurement.
+While anything was still declined, `0 wrong` was not a claim about the patterns
+that parsed end to end. A pattern the scanner declined still returned the tokens
+it had produced first, and those were compared against the recording's leading
+tokens — so a bug in a branch that existed was reported as wrong even when the
+same pattern tripped on something unbuilt further along. One token was exempt:
+upstream rewrites tokens after pushing them, always the one immediately before, so
+the token adjacent to the construct that stopped the scanner was not yet final.
+DECISIONS.md §9 has the measurement, and the rule still governs any branch added
+behind an option.
 
 An unbuilt construct returns an error rather than falling back to treating the
 input as literal text. The fallback would produce a token stream that is wrong

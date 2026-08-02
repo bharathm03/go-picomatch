@@ -2,7 +2,9 @@ package picomatch
 
 import "errors"
 
-// ErrNotImplemented is returned by every entry point until the matcher lands.
+// ErrNotImplemented is returned by every entry point that reaches the matcher,
+// until the matcher lands. [Scan] is not one of them: lib/scan.js is ported in
+// full, so it answers every input.
 //
 // It is deliberately not an [*Error]: it carries no upstream message, because
 // upstream has no such failure. The conformance harness scores it as a failure

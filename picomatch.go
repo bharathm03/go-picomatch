@@ -6,8 +6,10 @@
 //
 // # Status
 //
-// The API below is declared but not yet implemented; every entry point returns
-// [ErrNotImplemented]. The behavioural fixtures the implementation is being built
+// The matching API below is declared but not yet implemented; [New], and so
+// [IsMatch] and [Pattern.Match] with it, returns [ErrNotImplemented]. [Scan] is
+// the exception: lib/scan.js is ported in full, so it returns a real answer and
+// a nil error for every input. The behavioural fixtures the rest is being built
 // against are already in place — see testdata/original and the conformance
 // harness in conformance_test.go.
 //
@@ -28,6 +30,8 @@
 // implementation is vendored under tests/original solely so its own unmodified
 // test suite can be recorded offline; it is never consulted at runtime.
 package picomatch
+
+import "github.com/bharathm03/go-picomatch/internal/scan"
 
 // Pattern is a compiled glob, safe for concurrent use once built.
 type Pattern struct {
@@ -74,8 +78,12 @@ type ScanResult struct {
 	Negated        bool
 	NegatedExtglob bool
 
-	// Parts is populated only when Options.Parts is set; Slashes only when the
-	// scan ran to the end of the input.
+	// Parts and Slashes are both populated only when Options.Parts is set.
+	// Upstream attaches them under `opts.parts` or `opts.tokens` (scan.js:350),
+	// and this port does not carry `tokens` — DECISIONS.md §13. Options.ScanToEnd
+	// alone does not produce either: it changes how far the scan runs, not what
+	// is reported. When the option is set and the pattern holds no separator,
+	// both are empty rather than nil, which is upstream's `[]`.
 	Parts   []string
 	Slashes []int
 }
@@ -126,7 +134,38 @@ func IsMatch(input string, patterns []string, opts *Options) (bool, error) {
 
 // Scan splits pattern into its literal prefix and its glob remainder without
 // compiling it.
+//
+// The error is always nil. Upstream's scan() has no throw path — no length
+// guard, no rejected syntax — so every input has an answer; the return signature
+// keeps the shape the rest of the API uses rather than promising a failure mode
+// that does not exist.
 func Scan(pattern string, opts *Options) (ScanResult, error) {
-	_ = opts.options()
-	return ScanResult{Input: pattern}, ErrNotImplemented
+	o := opts.options()
+	// NoExt alone, not extglobDisabled(): scan.js reads `opts.noext` at :171 and
+	// :288 and never reads `opts.noextglob`, and lib/picomatch.js:242 passes the
+	// options object through without normalising the alias.
+	r := scan.Scan(pattern, scan.Options{
+		NoExt:     o.NoExt,
+		NoNegate:  o.NoNegate,
+		NoParen:   o.NoParen,
+		Unescape:  o.Unescape,
+		ScanToEnd: o.ScanToEnd,
+		Parts:     o.Parts,
+	})
+	return ScanResult{
+		Input:          r.Input,
+		Prefix:         r.Prefix,
+		Start:          r.Start,
+		Base:           r.Base,
+		Glob:           r.Glob,
+		IsBrace:        r.IsBrace,
+		IsBracket:      r.IsBracket,
+		IsGlob:         r.IsGlob,
+		IsGlobstar:     r.IsGlobstar,
+		IsExtglob:      r.IsExtglob,
+		Negated:        r.Negated,
+		NegatedExtglob: r.NegatedExtglob,
+		Parts:          r.Parts,
+		Slashes:        r.Slashes,
+	}, nil
 }
