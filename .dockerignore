@@ -7,6 +7,7 @@
 
 # Generated locally, regenerated in the image.
 conformance-report.json
+emit-report.json
 coverage.out
 coverage.*
 *.test

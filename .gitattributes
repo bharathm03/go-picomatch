@@ -16,3 +16,8 @@ tests/original/** -text
 # The recorded fixtures back the parity claim and are quoted by byte size; keep
 # them byte-identical across platforms for the same reason.
 testdata/original/** -text
+
+# testdata/emit is regenerated and `git diff --exit-code`d in CI on ubuntu while
+# being generated on Windows here, so a line-ending rewrite on either side reads
+# as generator drift. Pin the bytes, same as above.
+testdata/emit/** -text

@@ -75,14 +75,26 @@ const portableWithPattern = () =>
   records().filter(r => r.portable && patternOf(r) !== null);
 
 /**
- * Which of picomatch's three parsers `makeRe` actually used, under DEFAULT
- * options. One of 'top' | 'inline' | 'none'.
+ * Which of picomatch's three parsers `makeRe` actually used, under `opts`
+ * (default options when omitted). One of 'top' | 'inline' | 'none'.
+ *
+ * `opts` is threaded into BOTH calls because the selection genuinely depends on
+ * it — `nobrace`/`noext`/`noglobstar` change what parse.fastpaths returns, and
+ * the inline path's own guard at parse.js:606 reads opts. Callers that pass
+ * nothing get exactly the previous behaviour, which is what keeps every existing
+ * probe and testdata/tokens byte-identical across this widening.
  *
  *   'top'    parse.fastpaths() returned output, so parse() never ran.
  *            ELIGIBILITY IS NOT USE: picomatch.js:311-317 calls fastpaths for
  *            every pattern starting '.' or '*' but falls through to the full
  *            scanner whenever the result is falsy. On this corpus 382 patterns
  *            are eligible and 25 actually take it.
+ *            The guard at :311 is a CONJUNCTION -- `options.fastpaths !== false`
+ *            AND the leading character -- and dropping the first half is not
+ *            latent once opts is threaded in: makeRe('*.js', {fastpaths:false})
+ *            never calls fastpaths at all, so reporting 'top' for it names a
+ *            parser that did not run. The `!== false` is deliberate rather than
+ *            a truthiness test, so `{fastpaths: undefined}` stays eligible.
  *   'inline' parse() returned from the fast path at parse.js:606, before the
  *            scanner loop. Observable because `index` is still its initial -1;
  *            that block's two `return state` sites are the only exits from
@@ -94,10 +106,12 @@ const portableWithPattern = () =>
  * contains a '/' and looks ineligible while the scanner actually sees 'foo' and
  * takes the fast path. Five corpus patterns differ between the two readings.
  */
-const fastpathOf = p => {
+const fastpathOf = (p, opts = {}) => {
   const parse = parseModule();
-  try { if (parse.fastpaths(p, {})) return 'top'; } catch (e) { /* fall through, as makeRe does */ }
-  try { if (parse(p, {}).index === -1) return 'inline'; } catch (e) { /* unparseable: not a fast path */ }
+  if (opts.fastpaths !== false) {
+    try { if (parse.fastpaths(p, opts)) return 'top'; } catch (e) { /* fall through, as makeRe does */ }
+  }
+  try { if (parse(p, opts).index === -1) return 'inline'; } catch (e) { /* unparseable: not a fast path */ }
   return 'none';
 };
 
@@ -117,9 +131,27 @@ const fastpathOf = p => {
  * patterns, of which 105 are byte-identical once unwrapped. `.dotfile` compiled
  * to `^(?:\.dotfile)$` against `\.dotfile` and was scored a divergence.
  *
- * The corrected count is 34. Note the leniency runs BOTH ways — the top fast
- * path adds `\/?` on 5 patterns, and the scanner adds it on 28 the inline path
- * leaves strict — so "the fast paths are more lenient" is not a safe shorthand.
+ * The corrected count is 67 corpus-wide: 44 inline, 23 top, 0 scanner. (An
+ * earlier revision of this block said 34; that figure does not reproduce — see
+ * the re-check below.) Note the leniency runs BOTH ways — the top fast path adds
+ * `\/?` on 5 patterns, and the scanner adds it on 28 the inline path leaves
+ * strict — so "the fast paths are more lenient" is not a safe shorthand. The
+ * remaining 34 differ structurally, e.g. `**\/*.md` compiles `(?:X\/)?` on the
+ * top path against `(?:^|\/|X\/)` in the scanner.
+ *
+ * Re-check -- prints `172 { top: 23, inline: 44, none: 0 }`, the raw count first
+ * and then the corrected split, which sums to 67. It deliberately does NOT call
+ * fastpathDiverges: that function IS the unwrapping, so asking it for the raw
+ * number would only ever return the corrected one.
+ *
+ *   node -e "const c=require('./tools/probes/lib/corpus'),pm=c.upstream();\
+ *     const u=s=>{const m=/^\^\(\?:([\s\S]*)\)\$$/.exec(s);return m?m[1]:s};\
+ *     let raw=0;const by={top:0,inline:0,none:0};\
+ *     for(const p of c.patterns()){let f,s;\
+ *       try{f=pm.makeRe(p,{},true);s=pm.makeRe(p,{fastpaths:false},true)}catch(e){continue}\
+ *       if(f!==s)raw++;const path=c.fastpathOf(p);\
+ *       if((path==='inline'?u(f):f)!==s)by[path]++}\
+ *     console.log(raw,by)"
  */
 const fastpathDiverges = p => {
   const pm = upstream();

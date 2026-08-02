@@ -910,6 +910,77 @@ trap #47.
 
 ---
 
+## 16. Two things `testdata/emit` does not record
+
+`testdata/emit` records upstream's emitted and compiled output for 2,038
+distinct (pattern, emit-relevant-options) pairs — `parse.fastpaths`'s output,
+the full scanner's, which parser `makeRe` actually used, and `compileRe`'s
+`source` and `flags`. Two things it deliberately leaves out. This is
+[§13](#13-two-values-on-the-scan-path-that-go-cannot-hold)'s argument at a
+different boundary, and it is here for §13's reason: a reader comparing the two
+implementations would otherwise think the port had got it wrong.
+
+**The platform is not an axis, because it is not an input.** Every other
+recorded set in this repo is captured twice, once per platform, and
+[§5](#5-optionswindows-is-explicit-never-inferred) makes a point of the 17% of
+paired fixtures that genuinely diverge. A platform-less fixture therefore looks
+like exactly the mistake this repo exists to rule out, so the measurement is
+worth stating rather than assuming.
+
+`utils.isWindows` is exported at `utils.js:17` and called **nowhere** inside
+`lib/`. The only platform input the emitter has is `opts.windows`, read at
+`parse.js:377` and `:1351` and passed positionally to `constants.globChars`,
+which tests `win32 === true`. Empirically: pinning `navigator.platform` to
+`linux` and then to `win32` and re-requiring the whole tree changes
+`makeRe(p, {}, true)` on **0 of 400** corpus patterns. And the corpus agrees with
+itself — of the 2,045 pairs the projection produces (before the `$function` drop
+below), **0 appear on only one platform**; the posix and windows records are pure
+duplication.
+
+So a `platform` field would double a 1.2 MB file to describe nothing. The 17%
+that do diverge diverge in the **matcher**: `picomatch.js:63` reads
+`opts.windows` into `posix`, which selects `utils.toPosixSlashes` at `:138`, and
+`utils.basename` splits on the same flag at `utils.js:63`. `testdata/original`
+already records all of that per platform, and `testdata/emit` does not reach it.
+
+**Any option value the recording encodes as `$function` is dropped, and
+counted.** That is `expandRange` and nothing else: 32 records, 7 pairs. The
+recorded value is a *function*, and a function's behaviour is not in the
+recording. Reproducing it means evaluating recorded JavaScript source, and two
+of the three recorded sources call `fill-range` — an npm package this repo does
+not vendor and does not pin. A fixture whose expected values came from
+`fill-range@whatever-resolved-today` is not a recording of picomatch, and it
+would break byte-identical regeneration the first time that package moved.
+
+The exclusion is by a mechanical rule — any `$function`-valued *emit* key — and
+it is reported in `summary.excluded` rather than silently dropped, because a
+quietly smaller denominator is indistinguishable from progress. The rule only
+ever bites `expandRange`: 1,622 records carry a `$function` value at all, and the
+keys are `format` (1,590), `onMatch` (392) and `expandRange` (32) — only the last
+is an emit key, and the other two are matcher-only and project away regardless.
+[§15](#15-expandrange-asks-a-regex-engine-a-question-gos-cannot-answer-so-the-port-answers-it-itself)
+already carries the port's answer for picomatch's *own* `expandRange`; what has
+no answer is a caller-supplied one.
+
+Neither exclusion touches `state.tokens`, which is `testdata/tokens`' job and
+which [§6](#6-parser-state-and-match-objects-are-not-reproduced) keeps out of
+parity on the same line.
+
+**Re-check.**
+
+```bash
+node -e "const fs=require('fs');const s=fs.readFileSync('tests/original/lib/parse.js','utf8')+fs.readFileSync('tests/original/lib/picomatch.js','utf8');console.log(/isWindows|navigator/.test(s))"   # false
+node -e "const p=q=>{Object.defineProperty(globalThis,'navigator',{value:{platform:q},configurable:true,writable:true});for(const k of Object.keys(require.cache))if(k.includes('tests'))delete require.cache[k];return require('./tests/original')};console.log(p('linux').makeRe('*/*.js',{},true)===p('win32').makeRe('*/*.js',{},true))"   # true
+grep -c '"platform"' testdata/emit/cases.jsonl      # 0
+grep -c '\$function' testdata/emit/cases.jsonl      # 0
+node -e "console.log(JSON.parse(require('fs').readFileSync('testdata/emit/summary.json')).excluded)"   # 32 records / 7 pairs / expandRange
+```
+
+`docs/emit-oracle.md` holds the measurements this entry does not: the field
+census, the ceilings, and the option build order the fixture ranks.
+
+---
+
 ## Escape hatches
 
 None. No `unsafe`, no cgo, no `any` in non-generic positions in the port itself.

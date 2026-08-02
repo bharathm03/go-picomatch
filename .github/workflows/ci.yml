@@ -60,16 +60,27 @@ jobs:
         # Not a duplicate of the step above: the token harness reports its
         # percentage the same way, but it also FAILS on any pattern the scanner
         # answered wrongly. That check is unconditional by design, and without a
-        # step that runs it the design was aspirational — nothing else in CI
-        # executes anything behind the conformance tag except the two names in
-        # the regex above.
+        # step that runs it the design was aspirational — nothing behind the
+        # conformance tag runs in CI unless a step below names it in its `-run`
+        # regex.
         run: go test -tags conformance -run 'TestToken|TestCompareToken' -v ./...
+
+      - name: Emitter gate
+        # The same argument as the step above, one layer up. A harness whose name
+        # is in neither of the two `-run` regexes above never runs here at all,
+        # and this one localises what they cannot: tokens matching while the
+        # emitted source differs is an emitter bug, not a parser bug. It fails on
+        # any field an already-built branch answered wrongly, unconditionally;
+        # the percentage is only a gate when PICOMATCH_EMIT_MIN is set.
+        run: go test -tags conformance -run 'TestEmit|TestCompareEmit' -v ./...
 
       - uses: actions/upload-artifact@v4
         if: always() && matrix.os == 'ubuntu-latest'
         with:
           name: conformance-report
-          path: conformance-report.json
+          path: |
+            conformance-report.json
+            emit-report.json
           if-no-files-found: warn
 
   upstream-integrity:
@@ -102,3 +113,20 @@ jobs:
         run: |
           node tools/charaxis/generate.js
           git diff --exit-code -- testdata/charaxis/
+
+      # Same terms for the token fixtures. This check was described in CLAUDE.md
+      # before it existed, which left testdata/tokens unpinned against generator
+      # drift — and both it and the set below read the pattern corpus through
+      # tools/probes/lib/corpus.js, so an edit there now has to leave two
+      # committed fixture sets byte-identical or fail here.
+      - name: Token fixtures are reproducible
+        run: |
+          node tools/tokens/generate.js
+          git diff --exit-code -- testdata/tokens/
+
+      # And for the emitter fixtures. ~1.2 MB, committed for the same reason
+      # testdata/tokens is: the Go gate replays it without Node installed.
+      - name: Emitter fixtures are reproducible
+        run: |
+          node tools/emit/generate.js
+          git diff --exit-code -- testdata/emit/

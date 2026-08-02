@@ -150,8 +150,10 @@ discovered: `prefixTokens` (§14), the `unsupported` helper, and the last
 
 # Next: not another scanner branch
 
-The scanner is done under default options. Two things are not, and neither is
-sequenced here because neither is measured by `make tokens`.
+The scanner is done under default options. Two things are not, and **neither is
+sequenced here, because both are sequenced in
+[emit-oracle.md](emit-oracle.md)** — `make tokens` cannot rank them, and
+`testdata/emit` can. Re-run `make emit` rather than trusting either file.
 
 **The option surface.** Every `opts.X` branch the defaults do not take is marked
 at its site with the key that selects it, and none is written.
@@ -169,26 +171,37 @@ a gap rather than a decision. `Options.Windows` also has to reach
 the Windows set is two leaves away
 (`SLASH_LITERAL` and `QMARK`), by design.
 
+Which of those keys to write first is measured, not a matter of taste:
+`windows` 570 pairs, `strictSlashes` 245, `bash` 235, `dot` 207, then a tail
+ending at 1. The four together fully unblock 882 of the 1,018 non-default pairs.
+Full ranking and derivation in [emit-oracle.md](emit-oracle.md) §4.
+
 **The emitter and the matcher.** `make tokens` is at 100% and `make conformance`
-is at 0.01%, which is exactly the gap the three-oracle table in `CLAUDE.md`
-predicts: tokens matching while behaviour does not localises the bug to the
-emitter or the matcher, not to the scanner. The fast paths are the other half —
-382 patterns are eligible, 25 take it, and 67 compile to different source
-depending on the path — and the plan of record is unchanged: full-scanner
-semantics as the AST, the fast path as a separate normalisation pass gated by
-`Options.NoFastpaths`.
+is at 3.13%, which is exactly the gap the oracle table in `CLAUDE.md` predicts:
+tokens matching while behaviour does not localises the bug to the emitter or the
+matcher, not to the scanner. The emitter half of that is no longer unmeasured —
+`make emit` replays 2,038 recorded (pattern, options) pairs across three layers
+(fastpaths, scanner, `compileRe`) and reports what is unbuilt per blocker. The
+fast paths are the other half — 382 patterns are eligible, 25 take it, and 67
+compile to different source depending on the path — and the plan of record is
+unchanged: full-scanner semantics as the AST, the fast path as a separate
+normalisation pass gated by `Options.NoFastpaths`.
 
 ## Invariants every stage must preserve
 
 Not optional, and CI enforces each one:
 
-- `make tokens` reports **`0 wrong`**. A built branch that disagrees fails the
-  run outright, regardless of the percentage. To turn the percentage into a hard
-  gate for a stage, set the floor:
+- `make tokens` and `make emit` both report **`0 wrong`**. A built branch that
+  disagrees fails the run outright, regardless of the percentage. To turn a
+  percentage into a hard gate for a stage, set the floor:
   `PICOMATCH_TOKENS_MIN=32 go test -tags conformance -run TestTokenParity ./`
+  (`PICOMATCH_EMIT_MIN` is the same thing for the emitter, and is deliberately
+  unset until `windows` is threaded — every point it reads today is already
+  proven by `make tokens`).
 - `go test ./...` green untagged; `go vet` clean under **both** tag sets.
 - `gofmt` clean; `make verify-original` still reports 47 files matching.
-- `testdata/charaxis/` and `testdata/tokens/` regenerate **byte-identically**.
+- `testdata/charaxis/`, `testdata/tokens/` and `testdata/emit/` regenerate
+  **byte-identically**.
 - Anything not yet built keeps returning `UnsupportedError` with the upstream
   site. No construct does any more, but the rule is what the option work
   inherits. Never fall back to literal text — DECISIONS.md §9.

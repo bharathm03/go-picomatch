@@ -35,10 +35,13 @@ go.work.sum
 # The pipeline is a build-time tool; the Go package has no JavaScript at runtime.
 node_modules/
 
-# Written by `make conformance` / `make tokens` on every run.
+# Written by `make conformance` / `make tokens` / `make emit` on every run.
+# These rules are by exact name, so a new harness needs a new line here or its
+# report shows up as untracked after every run.
 conformance-report.json
 charaxis-report.json
 tokens-report.json
+emit-report.json
 
 # NOTE: testdata/original/ is generated but deliberately committed. It is the
 # evidence the parity claim rests on, and committing it means `go test` works

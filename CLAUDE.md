@@ -34,6 +34,16 @@ authoritative list. Three need an answer before code: `literalBrackets` (tested
 `maxExtglobRecursion` (a number or `false`), and `expandRange` (parse.js:23 — a
 caller-supplied *function*, with no `Options` field yet; DECISIONS.md §15).
 
+**That surface is now sequenced, not a pile of cleanup.** `testdata/emit` ranks
+the keys by the (pattern, options) pairs each unblocks, and it is very lopsided:
+`windows` 570, `strictSlashes` 245, `bash` 235, `dot` 207, then a tail ending at
+1 pair. Those four keys alone fully unblock **882 of the 1,018** non-default
+pairs, and `windows` — 56% of them, and the *only* key on 324 — is a
+constants-table swap (`constants.globChars(opts.windows)`) rather than a branch,
+so it is the cheapest first move by a wide margin. `docs/emit-oracle.md` holds
+the ranking and the ceilings; re-derive from `testdata/emit/summary.json` rather
+than trusting either file.
+
 The decline rule still governs everything added from here. Never fall back to
 plausible output: a plausible-but-wrong token stream scores as a pass wherever the
 guess coincides, which is indistinguishable from real progress. The token gate
@@ -61,13 +71,16 @@ Without `make`: `go build ./...`, `go test ./...`,
 ```bash
 make conformance    # replay testdata/original + testdata/charaxis -> parity %
 make tokens         # replay testdata/tokens against internal/parse -> parser %
+make emit           # replay testdata/emit against the emitter -> emitter %
 make mutate         # what the fixture sets CANNOT detect (needs Node)
 make probes         # diagnostics: which parser ran, which rule decided it
 ```
 
-`conformance` and `tokens` report rather than gate by default. Turn either into a
-gate with `PICOMATCH_PARITY_MIN`, `PICOMATCH_CHARAXIS_MIN`, `PICOMATCH_TOKENS_MIN`
-(percentages, e.g. `PICOMATCH_PARITY_MIN=95 make conformance`).
+`conformance`, `tokens` and `emit` report rather than gate by default. Turn any of
+them into a gate with `PICOMATCH_PARITY_MIN`, `PICOMATCH_CHARAXIS_MIN`,
+`PICOMATCH_TOKENS_MIN`, `PICOMATCH_EMIT_MIN` (percentages, e.g.
+`PICOMATCH_PARITY_MIN=95 make conformance`). `tokens` and `emit` also fail
+unconditionally on any *wrong* answer, floor or no floor.
 
 ### Running a single test
 
@@ -91,6 +104,7 @@ make verify-original # prove tests/original matches MANIFEST.json
 make extract        # re-record testdata/original from the upstream suite
 make charaxis       # regenerate testdata/charaxis
 make tokens-fixture # regenerate testdata/tokens
+make emit-fixture   # regenerate testdata/emit
 ```
 
 ## Architecture
@@ -114,12 +128,13 @@ conformance_test.go   replays them against the Go port -> parity %
 the equivalent loader for the token fixtures, deliberately a *separate* type from
 `internal/parse.Token` so drift shows up at the conversion.
 
-### Three oracles, and what each localises
+### Four oracles, and what each localises
 
 ```
-tokens differ                           -> parser bug      (make tokens)
-tokens match, regex differs             -> emitter bug     (tools/probes)
-tokens + regex match, behaviour differs -> matcher bug     (make conformance)
+tokens differ                            -> parser bug      (make tokens)
+tokens match, source differs             -> emitter bug     (make emit)
+tokens + source match, behaviour differs -> matcher bug     (make conformance)
+which parser ran / which rule decided it -> diagnostics     (make probes)
 ```
 
 The token gate exists because parity replays behaviour end-to-end and therefore
@@ -127,7 +142,17 @@ reads 0% for the entire time the parser is being written. See DECISIONS.md §6 f
 why using parser state as an *internal oracle* is not a reversal of the decision
 not to *expose* it.
 
-### Two fixture sets, never merged
+The emitter row used to point at `tools/probes`, which reports and gates nothing.
+Half that oracle already existed: `tools/tokens/generate.js:90` records
+`state.output` and `tokens_test.go:217` compares it, so the **full-scanner
+emitter under default options** has been gated at 1,491/1,491 all along.
+`testdata/emit` adds the three layers that were unmeasured — non-default options,
+`parse.fastpaths()`, and `compileRe`'s `^(?:…)$` wrap and flags. It scores
+**fields, not cases**, across 2,038 (pattern, options) pairs, and reads
+`2038 of 10879 = 18.73%, 0 wrong` today: the scanner layer at 50.11% and the
+other three at zero. See `docs/emit-oracle.md`.
+
+### Three fixture sets, never merged
 
 `testdata/original` is what upstream's own suite exercises — nobody chose its
 contents, which is what makes the number worth quoting. `testdata/charaxis` is
@@ -136,6 +161,13 @@ chosen input covering holes `tools/mutate` proved the upstream suite is blind to
 `maxLength` units, both fast paths). They have separate directories, separate
 tests, separate reports and separate floors. **Do not fold charaxis into the
 headline parity figure** — that would mix a measurement with a target.
+
+`testdata/emit` is the third: upstream's own patterns, but upstream's *internal*
+output — the emitted source, the fast paths, the compiled `source` and `flags`,
+per (pattern, options) pair. That makes it DECISIONS.md §6 material exactly as
+`testdata/tokens` is, so it gets its own directory, its own test, its own
+`emit-report.json` and its own floor, and **it is never folded into the parity
+figure either**. What it does not record, and why, is DECISIONS.md §16.
 
 ### Upstream has three parsers, and they disagree
 
@@ -170,7 +202,10 @@ backtracking AST walker. DECISIONS.md §1.
   editing. Never edit it in place, and never "fix" a fixture to make a test pass —
   that is the exact failure mode this repo exists to rule out.
 - **`testdata/charaxis/` must regenerate byte-identically.** CI runs the generator
-  and `git diff --exit-code`. Same for `testdata/tokens/`.
+  and `git diff --exit-code`. Same for `testdata/tokens/` and `testdata/emit/`,
+  which matters more than it looks: all three read the pattern corpus through
+  `tools/probes/lib/corpus.js`, so one edit there has to leave three committed
+  fixture sets byte-identical.
 - **`go test ./...` must stay green** even at 0% parity. Parity lives behind the
   build tag so the everyday signal is never diluted.
 - **`go vet` runs under both tag sets** — a compile error inside `//go:build
@@ -197,6 +232,10 @@ backtracking AST walker. DECISIONS.md §1.
   DECISIONS.md §2 before adding one.
 - **`Options.Windows` is never inferred from the host.** 17% of paired fixtures
   genuinely diverge between platforms; both are recorded and both are contract.
+  The other side of the same fact: `testdata/emit` has **no** platform axis,
+  because `utils.isWindows` is called nowhere in `lib/` and `opts.windows` is the
+  only platform input the *emitter* has. The 17% diverge in the matcher.
+  DECISIONS.md §16.
 - **picomatch counts UTF-16 code units**, not runes or bytes. `for i, r := range s`
   and `len(s)` are both wrong for `?`, `maxLength`, and character classes. This is
   the single most likely way an idiomatic Go implementation silently diverges, and
@@ -220,7 +259,12 @@ backtracking AST walker. DECISIONS.md §1.
 - `docs/build-order.md` — which branch to write next, staged, with the upstream
   sites and the gate figure each stage must reach. Derived from
   `make build-order`; re-run that rather than trusting the file, which goes stale
-  as branches land.
+  as branches land. The scanner's order is finished; what comes next is ranked in
+  the file below, not there.
+- `docs/emit-oracle.md` — the same thing for the emitter: the field census, the
+  ceilings (no single axis clears half), which option key to thread next ranked
+  by pairs unblocked, and the regex constructs the emitter has to produce.
+  Authority is `testdata/emit/summary.json`; re-derive rather than trust.
 - `DECISIONS.md` — every deliberate divergence from upstream, with a re-check
   command for each. Add an entry rather than a code comment when the port will not
   match upstream.
@@ -234,7 +278,9 @@ backtracking AST walker. DECISIONS.md §1.
   merge is JavaScript-truthy, `}` emits a literal where `]` escapes, `consumed` is
   not a slice of the input. **Read it before adding a scanner branch**, and add an
   entry when a branch turns up another. Each entry needs the upstream site, the
-  reading that would have been wrong, and what it costs.
+  reading that would have been wrong, and what it costs. #50 and #51 are the two
+  places `parse.fastpaths` and `parse()` read the *same* option differently —
+  read those before writing the fastpaths pass.
 
 Prose learnings go in `docs/`, not in a comment block at the top of a file. The
 code keeps one-line markers at the sites they describe; the reasoning lives in

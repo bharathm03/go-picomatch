@@ -1434,6 +1434,160 @@ upstream's answer, and the port's job is to give the same one.
 
 ---
 
+## 50. `fastpaths` measures the input *before* `REPLACEMENTS`, `parse()` after — `parse.js:1333` vs `:361`
+
+The two parsers apply the same two steps in opposite orders.
+
+```js
+// parse.fastpaths, :1332-1338
+const max = typeof opts.maxLength === 'number' ? Math.min(MAX_LENGTH, opts.maxLength) : MAX_LENGTH;
+const len = input.length;                      // :1333  measure
+if (len > max) { throw new SyntaxError(...); }
+input = REPLACEMENTS[input] || input;          // :1338  then replace
+
+// parse, :361-367
+input = REPLACEMENTS[input] || input;          // :361   replace
+...
+let len = input.length;                        // :366   then measure
+if (len > max) { throw new SyntaxError(...); }
+```
+
+`REPLACEMENTS` (`constants.js:105`) maps `'***'` to `'*'` and `'**/**'` and
+`'**/**/**'` to `'**'`, so for those three inputs the two length checks are
+counting different strings.
+
+**The wrong reading.** That the two share a length guard, so the port can hoist
+one `maxLength` check in front of both parsers — or, worse, apply
+`REPLACEMENTS` once at the entry point where both can see it.
+
+**What it costs.** The throw itself, on exactly the inputs where it is easiest to
+believe there is no difference. Measured:
+
+```
+parse.fastpaths('***', {maxLength: 2})   SyntaxError: Input length: 3, exceeds maximum allowed length: 2
+parse('***', {maxLength: 2})             returns, output (?!\.)(?=.)[^/]*?\/?
+```
+
+And because `fastpaths` is called bare at `picomatch.js:313`, that throw escapes
+`makeRe` from the *fast path*, not from `parse()`. `testdata/emit` keeps
+`fastpathThrow` and `scannerThrow` as separate fields so the asymmetry is
+recordable — but **no recorded case exercises it**: the corpus's only
+`fastpathThrow` is a 65,537-unit pattern under default options, which is over
+`MAX_LENGTH` on either ordering, so the scanner throws beside it. The witness
+above is a chosen input, and that is the point — this trap is invisible to every
+fixture set in the repo.
+
+## 51. `nodot` and `star` are defined differently in the two parsers — `parse.js:1353`, `:1357` vs `:399`, `:401`
+
+Same two names, driven by the same two options, different values.
+
+```js
+// parse.fastpaths, :1353 and :1357
+const nodot = opts.dot ? NO_DOTS : NO_DOT;
+let star = opts.bash === true ? '.*?' : STAR;
+
+// parse, :399 and :401
+const nodot = opts.dot ? '' : NO_DOT;
+let star = opts.bash === true ? globstar(opts) : STAR;
+```
+
+Under `dot` the fast path emits `NO_DOTS` where the scanner emits **nothing**;
+under `bash` the fast path emits the literal `.*?` where the scanner emits a
+whole `globstar(opts)` group. The `!opts.dot` arms agree, which is exactly why
+this survives casual reading: under default options the two definitions are
+identical.
+
+**The wrong reading.** Factoring the two parsers' preamble into one helper —
+the natural move, since much of it *is* identical, including the whole
+`constants.globChars(opts.windows)` destructuring — or writing the fastpaths
+pass later and copying the scanner's definitions across because they are already
+there and already tested.
+
+**What it costs.** Every `dot`- or `bash`-bearing record on the fastpath layer:
+**225 of the 728** eligible pairs in `testdata/emit` carry one of the two keys
+(157 `dot`, 68 `bash`), and 29 of the 79 pairs that actually take the top path
+do. It costs nothing at all under default options, so no gate that runs today
+would report it.
+
+---
+
+# lib/picomatch.js, the compile layer
+
+## 52. `source` is not `^(?:output)$` — V8 escapes `/` on the way out — `picomatch.js:273` vs `RegExp.prototype.source`
+
+`compileRe` builds the string `^(?:${state.output})$` and hands it to
+`toRegex`. Reading the recorded `source` back off the compiled RegExp does not
+return that string:
+
+```js
+const pm = require('./tests/original');
+pm.makeRe('foo[/]bar', {}, true)      //=> 'foo(?:\\[/\\]|[/])bar'
+pm.makeRe('foo[/]bar', {}).source     //=> '^(?:foo(?:\\[\\/\\]|[/])bar)$'
+new RegExp('a/b').source              //=> 'a\\/b'
+```
+
+The `/` inside `\[/\]` came back as `\/`. This is not picomatch: ECMAScript
+specifies `RegExp.prototype.source` to escape every `/` that is not already
+escaped and not inside a character class, so the source can be re-read as a
+`/…/` literal. The `[/]` two characters later is *inside* a class and is left
+alone, which is why the two `/` in one pattern serialise differently.
+
+**The wrong reading.** Implementing the compile layer as
+`"^(?:" + output + ")$"` from the doc comment, then diffing it against the
+recorded `source` and concluding the emitter is wrong. Or worse, "fixing" the
+emitter to produce `\/` so the diff goes away, which corrupts `output` — the
+field the scanner is actually gated on — to satisfy a serialisation artifact.
+
+**What it costs.** 5 of the 2,028 compiled records in `testdata/emit`, all of
+them patterns containing `[/]`: `foo[/]bar` (×3 option sets), `foo[/]bar[/]`,
+`foo[/]bar[/]baz`. `TestEmitParity` is fatal on any `Wrong`, so these become 5
+false disagreements the day the compile layer's blocker is lifted.
+
+Re-check — prints `{ ok: 2020, fallback: 3, slashArtifact: 5 }`:
+
+```bash
+node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').split('\n').filter(Boolean).map(JSON.parse);let ok=0,fb=0,slash=0;for(const x of r){if(x.source===undefined)continue;const w='^(?:'+x.output+')\$';if(x.source===w||x.source==='^(?!'+w+').*\$'){ok++;continue}if(x.source==='\$^'){fb++;continue}slash++}console.log({ok,fallback:fb,slashArtifact:slash})"
+```
+
+---
+
+## 53. An uncompilable source is not an error — it is `/$^/` — `picomatch.js:344-347`
+
+```js
+picomatch.toRegex = (source, options) => {
+  try {
+    const opts = options || {};
+    return new RegExp(source, opts.flags || (opts.nocase ? 'i' : ''));
+  } catch (err) {
+    if (options && options.debug === true) throw err;
+    return /$^/;
+  }
+};
+```
+
+When the emitter produces something the RegExp constructor rejects, picomatch
+does not throw and does not report it. It returns `/$^/` — `$` then `^`, a
+pattern that matches nothing — and the caller gets a matcher that answers
+`false` to every input. The throw is reachable only under `opts.debug === true`,
+which no corpus record sets.
+
+**The wrong reading.** Treating an uncompilable output as an error path, so the
+port returns an error where upstream returns a total function that always says
+no. Every one of those inputs is a recorded `false`, not a recorded throw, so
+the two are distinguishable by fixture and the error is scored as a failure.
+
+The subtler half: because the failure is swallowed, an emitter bug that produces
+invalid regex syntax is *invisible* in behaviour except as unexplained
+non-matching. This is the one place in the pipeline where being wrong looks
+exactly like matching nothing.
+
+**What it costs.** 3 of the 2,028 compiled records, whose recorded `source` is
+the literal `$^`: `a\\(b` under defaults, `[[:alpha:]\]` under
+`{posix, regex, strictSlashes}`, and the 65,504-unit `[!(\\…` pattern. Same
+re-check as trap #52 — the `fallback: 3` column.
+
+---
+
 ## Related
 
 - [DECISIONS.md](../DECISIONS.md) §8 — why the scanner indexes UTF-16 code units.

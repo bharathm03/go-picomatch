@@ -63,6 +63,12 @@ conformance:
 tokens:
 	$(GO) test -tags conformance -run 'TestToken' -v $(PKG)
 
+## emit: replay testdata/emit against the port's emitter -> emitter %, stratified
+## by layer. PICOMATCH_EMIT_MIN=25 gates it; any `wrong` field fails regardless.
+.PHONY: emit
+emit:
+	$(GO) test -tags conformance -run 'TestEmit|TestCompareEmit' -v $(PKG)
+
 # --- Test-extraction pipeline (needs Node; not required to build or test) ----
 
 ## deps: install the extractor's Node dependencies
@@ -94,6 +100,11 @@ charaxis: verify-original
 .PHONY: tokens-fixture
 tokens-fixture: verify-original
 	node tools/tokens/generate.js
+
+## emit-fixture: regenerate testdata/emit from the vendored upstream
+.PHONY: emit-fixture
+emit-fixture: verify-original
+	node tools/emit/generate.js
 
 ## mutate: measure what the fixture sets can detect (see tools/mutate/README.md)
 .PHONY: mutate
