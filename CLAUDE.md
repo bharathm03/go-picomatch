@@ -78,6 +78,13 @@ reads, so no scanner branch can ever unblock them. The scanner layer's last 91
 fields are worth less than any one of the three untouched layers: `fastpath`
 (728 fields), `compile` (4,056) and `path` (2,028), all at zero.
 
+`compile` is the next one to build, and DECISIONS.md §17 scopes it: the emitted
+regex **source string** is in scope, the compiled `*regexp.Regexp` is not. §1
+only ever ruled out the second, and reading "no regex" as one rule would decline
+string concatenation over a lookaround problem it does not have. Three rules
+cover all 2,028 compiled records — the `^(?:output)$` wrap, `EscapeRegExpPattern`
+on 5, the `$^` sentinel on 3 — and `flags` takes two values corpus-wide.
+
 The decline rule still governs everything added from here. Never fall back to
 plausible output: a plausible-but-wrong token stream scores as a pass wherever the
 guess coincides, which is indistinguishable from real progress. The token gate
@@ -228,6 +235,13 @@ Go's `regexp` is RE2 and picomatch's output relies on lookaround in almost every
 non-trivial pattern (six of seven representative patterns fail `regexp.Compile`).
 Matching goes through `Pattern` alone; the target implementation is a memoised
 backtracking AST walker. DECISIONS.md §1.
+
+That rules out the compiled object, **not** the source string. §17 draws the
+line: `compileRe`'s `source` and `flags` are recorded values the port
+reproduces, exactly as `scannerOutput` is, and producing them needs no engine.
+No `MakeRe` either way — but the day the compile layer lands, a
+`MakeRe(pattern, opts) (string, error)` becomes an export rather than a second
+backend.
 
 ## Invariants that break things quietly if ignored
 

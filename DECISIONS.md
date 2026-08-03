@@ -63,7 +63,22 @@ second full backend — an ECMAScript emitter beside the AST matcher — and it 
 deliberately not in scope. It is an addition, not a change: nothing here would
 have to be undone.
 
-**Re-check.** `go doc ./... | grep -i regexp` should find nothing.
+[§17](#17-the-regex-source-is-reproduced-the-regex-is-not) takes half of that
+step and states why it is not a reversal: the emitted *source string* is in
+scope and gated by `testdata/emit`, because producing it needs no engine. What
+this entry rules out is the compiled object, and that stands.
+
+**Re-check.** Both should print `0` — no exported declaration names `regexp`,
+and no non-test file in the port imports it:
+
+```bash
+go doc -short . | grep -ci regexp
+grep -rl '"regexp"' --include='*.go' . | grep -vc '_test.go'
+```
+
+Not `go doc ./... | grep -i regexp`: `go doc` rejects a `./...` argument, and
+`-all` matches this entry's own prose, so both forms answer a different question
+than the one asked.
 
 ---
 
@@ -978,6 +993,111 @@ node -e "console.log(JSON.parse(require('fs').readFileSync('testdata/emit/summar
 
 `docs/emit-oracle.md` holds the measurements this entry does not: the field
 census, the ceilings, and the option build order the fixture ranks.
+
+---
+
+## 17. The regex *source* is reproduced; the regex is not
+
+**Upstream.** `picomatch.compileRe` builds a source string, hands it to
+`toRegex`, and returns a live `RegExp`. Callers get `makeRe()`, and the matcher
+closes over the compiled object.
+
+**This port.** The source string is reproduced and gated. The compiled object is
+not, and `MakeRe` still does not exist.
+
+Those are two decisions, not one, and
+[§1](#1-no-compiled-regular-expression-is-exposed) only ever settled the second.
+This entry states the first, because "no regex" read as a single rule would
+delete the largest tractable block of work left in the repo.
+
+**Why the string is in scope.** `compileRe` is string concatenation and nothing
+else — `picomatch.js:269-277` in full:
+
+```js
+const prepend = opts.contains ? '' : '^';
+const append  = opts.contains ? '' : '$';
+let source = `${prepend}(?:${state.output})${append}`;
+if (state && state.negated === true) source = `^(?!${source}).*$`;
+```
+
+No engine is consulted to produce it. Measured against the fixture, that rule
+plus the two serialisation facts already recorded as traps accounts for **every
+compiled record**:
+
+| Rule | Records | Site |
+|---|---:|---|
+| `^(?:output)$`, or `^(?!^(?:output)$).*$` when negated | 2,020 | picomatch.js:273-276 |
+| the same, then ECMAScript `EscapeRegExpPattern` (`/` → `\/` outside a class) | 5 | trap #52 |
+| `$^`, because the RegExp constructor rejected the source | 3 | trap #53 |
+| | **2,028** | |
+
+`flags` is the same shape: `opts.flags || (opts.nocase ? 'i' : '')`, and the
+recorded values across all 2,028 records are exactly two — `""` (2,017) and
+`"i"` (11).
+
+So the `compile` layer is 4,056 of the emit gate's 10,879 fields — **37%**, the
+largest unbuilt block that is not the matcher — and reaching it requires no
+regex engine, only the ability to concatenate strings the scanner already
+produces correctly. Declining it on the strength of §1 would be declining
+string concatenation because of a lookaround problem it does not have.
+
+**Why the compiled object is still out of scope.** Unchanged, for §1's reason:
+RE2 has no lookaround and picomatch's output depends on it. Producing the text
+`^(?:(?!\.)…)$` is a `strings.Builder` call; asking Go's `regexp` to compile it
+is a guaranteed error. The port emits the source it can prove correct and never
+claims to have compiled it.
+
+**What this costs in the public API — measured at zero.** Nothing here adds
+`MakeRe`, and nothing about not having it moves a parity number:
+
+- `lib/picomatch.makeRe` (72 cases) and `lib/picomatch.parse` (32) are scored
+  `unsupported`, leaving both the numerator and the denominator.
+- 4,576 of 20,930 records *do* carry a regex source inside their recorded
+  result, 4,516 of them `index.matcher`. Those records are replayed and scored —
+  on `glob`, `posix`, `input`, `output` and `isMatch` — with `regex` and `match`
+  declared exempt in `matcherFieldsNotCompared` (`conformance_test.go:306`).
+  The exemptions are enforced by `TestMatcherExemptionsAreDeclared`, so a new
+  recorded key cannot join them silently.
+
+The usability cost of having no `MakeRe` is therefore not parity but
+inspection: a caller debugging a pattern cannot read `.source`, and cannot hand
+the source to a JS or PCRE engine. That is real, and it is also cheap to undo —
+once the compile layer exists, `MakeRe(pattern string, opts *Options) (string,
+error)` returning the recorded ECMAScript text is an export, not a backend. §1's
+"reversible, at a price" paragraph priced that as a second full emitter because
+the emitter did not exist; this entry is the decision to build it, so the price
+is now the export alone. Still not done here — an addition, not a change.
+
+**What is not in scope even as a string.** The compiled object's *behaviour*.
+Nothing in this entry lets the port answer `isMatch` by running a regex; the
+matcher remains the memoised backtracking AST walker §1 describes. `source` is a
+recorded value the port reproduces, in the same sense `scannerOutput` is.
+
+**Re-check.**
+
+```bash
+sed -n '269,277p' tests/original/lib/picomatch.js
+
+# every compiled record, by rule: { ok: 2020, fallback: 3, slashArtifact: 5 }
+node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').split('\n').filter(Boolean).map(JSON.parse);let ok=0,fb=0,slash=0;for(const x of r){if(x.source===undefined)continue;const w='^(?:'+x.output+')\$';if(x.source===w||x.source==='^(?!'+w+').*\$'){ok++;continue}if(x.source==='\$^'){fb++;continue}slash++}console.log({ok,fallback:fb,slashArtifact:slash})"
+
+# the two recorded flags values, and the layer's share of the gate
+node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').split('\n').filter(Boolean).map(JSON.parse);console.log([...new Set(r.filter(x=>x.flags!==undefined).map(x=>x.flags))])"
+node -e "console.log(JSON.parse(require('fs').readFileSync('testdata/emit/summary.json')).layers)"
+
+# records carrying a regex source in their result, and the exemption that covers them
+node -e "let n=0,re=0;for(const l of require('fs').readFileSync('testdata/original/cases.jsonl','utf8').split('\n')){if(!l)continue;const c=JSON.parse(l);n++;if(JSON.stringify(c.result||null).includes('\"\$regexp\"'))re++}console.log({records:n,carryingARegexSource:re})"
+grep -n 'matcherFieldsNotCompared' conformance_test.go
+
+# §1 still holds: no exported declaration names regexp, nothing imports it
+go doc -short . | grep -ci regexp                                   # 0
+grep -rl '"regexp"' --include='*.go' . | grep -vc '_test.go'        # 0
+```
+
+Traps #52 and #53 in [transcription-traps.md](docs/transcription-traps.md) are
+the two places the obvious reading of `compileRe` is wrong, and both are fatal
+to `TestEmitParity` the day this layer's blocker is lifted, because that gate
+fails outright on any `Wrong`. Read them before writing it.
 
 ---
 

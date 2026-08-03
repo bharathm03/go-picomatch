@@ -198,9 +198,15 @@ compile-layer keys whose only reader in all of `lib/` is `picomatch.js:343`, so
 no branch of `internal/parse` can ever reach them. The scanner layer's last 91
 fields are worth less than any one of the three layers still at zero:
 `fastpath` (728 fields, `parse.fastpaths()`), `compile` (4,056, `compileRe` and
-`toRegex`) and `path` (2,028, the selector at picomatch.js:312-316). `compile`
-needs a DECISIONS.md entry before code — §1 established this port has no
-`MakeRe`, and `source`/`flags` are a regex the port never compiles.
+`toRegex`) and `path` (2,028, the selector at picomatch.js:312-316).
+
+`compile` is the largest and, measured, the cheapest: it needs no regex engine.
+[DECISIONS.md](../DECISIONS.md) §17 is the entry that scopes it — the emitted
+*source string* is in scope where the compiled object is not, and §1 only ever
+ruled out the second. Three rules cover all 2,028 compiled records: the
+`^(?:output)$` wrap, ECMAScript's `EscapeRegExpPattern` on 5 of them
+([transcription-traps.md](transcription-traps.md) #52), and the `$^` sentinel on
+3 (#53). `flags` takes two values in the whole corpus, `""` and `"i"`.
 
 Two things `windows` established that carried forward. The Windows constants
 table is **four** leaves and twelve derivations, not two, and the leaf that

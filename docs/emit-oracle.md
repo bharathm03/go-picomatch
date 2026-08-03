@@ -395,7 +395,10 @@ carrying eight pairs between them. `nocase` and `flags` are compile-layer keys �
 them, and 11 of the 49 are theirs. The scanner layer's remaining 91 fields are
 worth less than any one of the three untouched layers, and the ranking that
 matters from here is `fastpath` (728 fields), `compile` (4,056) and `path`
-(2,028), not another option key.
+(2,028), not another option key. `compile` is both the largest and the cheapest —
+it needs no regex engine, only string concatenation over `output`, which the
+scanner already produces correctly on 97.76% of pairs. [DECISIONS.md](../DECISIONS.md)
+§17 scopes it; §7(c) below is its field census.
 
 **The record-level ranking in an earlier draft does not reproduce** (`windows`
 3240, `strictSlashes` 1840, `dot` 1668, `bash` 1132, `regex` 300, `posix` 296,
@@ -627,6 +630,12 @@ node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').
 prints `{ ok: 2020, fallback: 3, slashArtifact: 5 }`. `TestEmitParity` is fatal
 on any `Wrong`, so these are 8 false disagreements waiting for the day the
 compile layer's blocker is lifted.
+
+That day is now scoped: [DECISIONS.md](../DECISIONS.md) §17 puts the emitted
+`source` and `flags` **in** scope and leaves the compiled `*regexp.Regexp` out,
+which §1 alone did not distinguish. Those three rules — wrap,
+`EscapeRegExpPattern`, `$^` — are the whole layer, and the census above is the
+proof that nothing else is in it.
 
 ### (d) `output` was recorded and asserted by nothing
 
