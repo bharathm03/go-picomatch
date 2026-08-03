@@ -156,43 +156,47 @@ sequenced here, because both are sequenced in
 `testdata/emit` can. Re-run `make emit` rather than trusting either file.
 
 **The option surface.** Every `opts.X` branch the defaults do not take is marked
-at its site with the key that selects it, and none is written.
-`grep -n "opts\." internal/parse/*.go` is the list; it is 40-odd sites over
-`dot`, `bash`, `capture`, `posix`, `strictBrackets`, `strictSlashes`, `nobrace`,
-`nobracket`, `noextglob`, `noglobstar`, `nonegate`, `unescape`, `keepQuotes`,
-`regex`, `literalBrackets`, `maxExtglobRecursion`, `prepend` and `expandRange`.
-Three of those need an answer before the code: `literalBrackets` is tested
-against both `=== false` and `=== true` so unset is a third state
-([DECISIONS.md](../DECISIONS.md) §2 already has it as a `*bool`);
+at its site with the key that selects it, until the day it is written.
+`grep -n "opts\." internal/parse/*.go` finds what is left: `capture`, `posix`,
+`strictBrackets`, `nobrace`, `nobracket`, `noextglob`, `noglobstar`, `nonegate`,
+`unescape`, `keepQuotes`, `regex`, `literalBrackets`, `maxExtglobRecursion`,
+`prepend` and `expandRange`. Three of those need an answer before the code:
+`literalBrackets` is tested against both `=== false` and `=== true` so unset is
+a third state ([DECISIONS.md](../DECISIONS.md) §2 already has it as a `*bool`);
 `maxExtglobRecursion` takes a number or `false`; and `expandRange` is a
-caller-supplied **function** with no `Options` field at all, which §15 records as
-a gap rather than a decision. `Options.Windows` is the exception: it is **written**, and it is the shape the
-rest are not. It reaches `constants.globChars` and nothing else, so it landed as
-`internal/parse/chars.go` — a table selected per parse — without touching a
-branch in the scanner.
+caller-supplied **function** with no `Options` field at all, which §15 records
+as a gap rather than a decision.
 
-Which of the rest to write first is measured, not a matter of taste. Raw pairs
-rank `strictSlashes` 245, `bash` 235, `dot` 207, then a tail ending at 1
-(`windows` led at 570 before it was threaded) — but raw pairs overstate two of
-the three the same way 570 overstated `windows` before the real figure was
-324-alone. Re-run on top of `windows` already answered: `bash` is genuinely
-independent and its solo figure equals its raw count (235); `dot` and
-`strictSlashes` share 78 pairs that need both, and `strictSlashes` has a
-further 51-pair tail that needs `posix` and `regex` too. Recommended build
-order is **`bash`, then `strictSlashes`, then `dot`** — the independent win
-first, then the two isolated sites, then the branch that reshapes bindings
-(`globstarBody`, `nodot`) five other call sites already depend on. All three
-together reach 1,902 of 2,038 pairs (93.33%), regardless of which of `dot` /
-`strictSlashes` goes second. Full derivation, site inventory and re-check
-commands in [emit-oracle.md](emit-oracle.md) §4.
+`Windows`, `Bash`, `StrictSlashes` and `Dot` are **written**. `Windows` is a
+constants-table swap (`internal/parse/chars.go`); the other three are real
+branches in `scanner.go` — `Bash` at parse.js:401/:675/:1156/:1248, built first
+because no corpus pair combines it with an unbuilt key so its raw and solo
+counts both read 235; `StrictSlashes` at :1193/:1304, built second because both
+its sites are isolated from every other key; `Dot` at :396/:399/:1041/:1270,
+built last because it reshapes `globstarBody` and `nodot`, which every globstar
+arm reads, and building it after `StrictSlashes` meant only one already-built
+branch's composition with it needed checking rather than two. Full derivation,
+site inventory and re-check commands in [emit-oracle.md](emit-oracle.md) §4.
+The 324 windows-only pairs, plus the 235/116/207 these three added on top, take
+the scanner layer 50.11% → **93.48%** and the headline 18.73% → **34.95%**, at
+**0 wrong** throughout.
 
-Two things `windows` established that the next three will not inherit. The
-Windows constants table is **four** leaves and twelve derivations, not two, and
-the leaf that looks derivable and is not costs a nested character class that
-JavaScript compiles rather than rejects — [transcription-traps.md](transcription-traps.md)
+What is next by pairs: `posix` (65), `regex` (52), `noextglob` (20), then a
+tail ending at 1. Neither `posix` nor `regex` is a table swap; they also
+combine with `strictSlashes` on 51 pairs that building all four keys above did
+not realize, so re-run the solo-count query in emit-oracle.md §4 rather than
+trusting raw pairs again.
+
+Two things `windows` established that carried forward. The Windows constants
+table is **four** leaves and twelve derivations, not two, and the leaf that
+looks derivable and is not costs a nested character class that JavaScript
+compiles rather than rejects — [transcription-traps.md](transcription-traps.md)
 #54. And a key becomes attemptable in the emitter gate only when it is added to
 `emitAnsweredOptions` in `emit_test.go`; forgetting that leaves its records
-scored `unbuilt`, which is the column that does not fail the run.
+scored `unbuilt`, which is the column that does not fail the run. Neither
+`bash`, `strictSlashes` nor `dot` needed a new transcription-traps.md entry —
+all seven of their sites translate directly with idioms already established
+elsewhere in the scanner.
 
 **The emitter and the matcher.** `make tokens` is at 100% and `make conformance`
 is at 3.13%, which is exactly the gap the oracle table in `CLAUDE.md` predicts:

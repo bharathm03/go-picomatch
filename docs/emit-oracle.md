@@ -305,10 +305,30 @@ sitting in `internal/parse/scanner.go` and `chars.go`:
   only reader is the inline fast path, which this package does not have yet
   (`scanner.go:187-194`).
 
-Recommended order: **`bash`, then `strictSlashes`, then `dot`** — biggest
+Built in that order — **`bash`, then `strictSlashes`, then `dot`** — biggest
 independent win first, then the two isolated sites, then the branch that
 touches bindings five other call sites already depend on, once there is less
 still-unbuilt code around it to interact badly with.
+
+**All three are now done, and the staging table above realized exactly as
+predicted.** `internal/parse.Options` gained `Bash`, `StrictSlashes` and `Dot`;
+the four sites for `bash`, the two for `strictSlashes` and the four for `dot`
+are all written in `internal/parse/scanner.go`, and `emitAnsweredOptions` in
+`emit_test.go` carries all three. Measured, not predicted: 1,902 of 2,038
+pairs attemptable (93.33%), **0 wrong** at every stage along the way (bash
+alone, bash+strictSlashes, and all three together). The scanner layer went
+66.04% → **93.48%** and the headline 24.69% → **34.95%**.
+
+None of the three needed a `transcription-traps.md` entry — every site
+translates directly with an idiom already established elsewhere in the
+scanner (the `len(rest) > 0 && rest[0] != '/'` JS-truthy pattern at `bash`'s
+:1156 site, for instance, already existed for the `/**/ ` middle-of-pattern
+arm). The one genuine cross-key composition in this batch — `dot` and
+`strictSlashes` meeting inside the trailing-`/**` globstar arm at parse.js:
+1188-1199 — needed no special-casing either, because `globstarBody` is read,
+not re-derived, at every one of its five call sites: building `dot`'s reshape
+of that one binding was enough for `strictSlashes`'s already-built closer
+logic to compose with it correctly.
 
 **The record-level ranking in an earlier draft does not reproduce** (`windows`
 3240, `strictSlashes` 1840, `dot` 1668, `bash` 1132, `regex` 300, `posix` 296,

@@ -7,17 +7,20 @@ package parse
 // # Options
 //
 // [Options] carries the keys this package answers, and [Parse] takes it. Today
-// that is `windows` alone — a table swap rather than a branch, so it lands as
-// chars.go rather than as anything in this file.
+// that is `windows` — a table swap rather than a branch, so it lands as
+// chars.go rather than as anything in this file — `bash`, four real branches
+// at parse.js:401, :675, :1156 and :1248, `strictSlashes`, two branches at
+// :1193 and :1304, and `dot`, which reshapes the globstarBody and nodot
+// bindings themselves (:396, :399) and gates two more sites, :1041 and :1270.
 //
-// Every other opts.X read in upstream still resolves to its default here: dot,
-// bash, capture, posix, strictBrackets, strictSlashes, nobrace, nobracket,
-// noextglob, noglobstar, nonegate, unescape, keepQuotes, regex, literalBrackets,
-// maxExtglobRecursion, prepend and expandRange are all unset. Branches those keys
-// select are marked with the key that will pick them, so the sites are findable
-// rather than silently baked in. `grep -n "opts\." internal/parse/*.go` is the
-// list, and [Options] says why a marked key does not get a field until its branch
-// is written.
+// Every other opts.X read in upstream still resolves to its default here:
+// capture, posix, strictBrackets, nobrace, nobracket, noextglob, noglobstar,
+// nonegate, unescape, keepQuotes, regex, literalBrackets, maxExtglobRecursion,
+// prepend and expandRange are all unset. Branches those keys select are marked
+// with the key that will pick them, so the sites are findable rather than
+// silently baked in. `grep -n "opts\." internal/parse/*.go` is the list, and
+// [Options] says why a marked key does not get a field until its branch is
+// written.
 //
 // # What is not built yet
 //
@@ -263,9 +266,28 @@ func newScannerUnits(input units, opts Options) *scanner {
 	// constants and star would read globstarBody once opts.bash is written.
 	s.opts = opts
 	s.chars = globCharsFor(opts.Windows)
-	s.globstarBody = `(` + capture + `(?:(?!` + s.chars.startAnchor + s.chars.dotLiteral + `).)*?)`
-	s.nodot = s.chars.noDot // opts.dot selects "" at parse.js:399
-	s.star = s.chars.star   // opts.bash selects globstar(opts) at parse.js:401
+	// parse.js:396. opts.dot selects DOTS_SLASH over DOT_LITERAL inside the
+	// globstar body — every globstar arm reads s.globstarBody, so this one
+	// binding is what opts.dot changes for all of them at once.
+	dotArm := s.chars.dotLiteral
+	if opts.Dot {
+		dotArm = s.chars.dotsSlash
+	}
+	s.globstarBody = `(` + capture + `(?:(?!` + s.chars.startAnchor + dotArm + `).)*?)`
+	// parse.js:399. opts.dot selects "" over NO_DOT.
+	s.nodot = s.chars.noDot
+	if opts.Dot {
+		s.nodot = ""
+	}
+	s.star = s.chars.star
+	if opts.Bash {
+		// parse.js:401. globstar(opts) is exactly s.globstarBody: the closure
+		// reads the same capture/PLATFORM_CHARS/opts.dot this field was built
+		// from two lines up, called with the same opts. opts.capture would wrap
+		// it in a group at parse.js:403-405, but Capture has no field yet, so
+		// that half stays unbuilt.
+		s.star = s.globstarBody
+	}
 
 	// parse.js:430, utils.removePrefix. This runs before the loop, so the rest
 	// of the scanner never sees a leading "./" and state.consumed is not a
@@ -552,7 +574,10 @@ func (s *scanner) run() error {
 		if c == '\\' {
 			next, ok := s.peek(1)
 
-			if ok && next == '/' { // opts.bash
+			// parse.js:675. Under opts.bash the condition is false and the
+			// backslash falls through to the general escape handling below
+			// instead of being silently dropped.
+			if ok && next == '/' && !s.opts.Bash {
 				continue
 			}
 			if ok && (next == '.' || next == ';') {
@@ -1120,7 +1145,7 @@ func (s *scanner) run() error {
 			// match a leading dot, and the guard is a class that excludes both
 			// the dot and the separator rather than a lookahead in front of
 			// QMARK.
-			if s.prev.typ == "slash" || s.prev.typ == "bos" { // opts.dot
+			if !s.opts.Dot && (s.prev.typ == "slash" || s.prev.typ == "bos") {
 				s.push(&token{typ: "qmark", value: value, output: out(s.chars.qmarkNoDot)})
 				if s.err != nil {
 					return s.err
@@ -1272,7 +1297,18 @@ func (s *scanner) run() error {
 			isStart := prior.typ == "slash" || prior.typ == "bos"
 			afterStar := before != nil && (before.typ == "star" || before.typ == "globstar")
 
-			// parse.js:1156, opts.bash. Marked, not written.
+			// parse.js:1156. Under opts.bash a star that either does not start a
+			// path segment or is followed by more non-slash text stays a plain
+			// star with an empty output, same shape as the isStart/isBrace/
+			// isExtglob arm three lines down but a different — and wider —
+			// condition, so it has to be checked first and separately.
+			if s.opts.Bash && (!isStart || (len(rest) > 0 && rest[0] != '/')) {
+				s.push(&token{typ: "star", value: value, output: out("")})
+				if s.err != nil {
+					return s.err
+				}
+				continue
+			}
 
 			// parse.js:1161-1166. A star that does not start a path segment
 			// stays a plain star, and its token carries an output that is
@@ -1334,8 +1370,12 @@ func (s *scanner) run() error {
 				prior.output = &po
 
 				s.prev.typ = "globstar"
-				// opts.strictSlashes emits ")" in place of "|$)".
-				s.prev.output = out(s.globstarBody + `|$)`)
+				// parse.js:1193. opts.strictSlashes emits ")" in place of "|$)".
+				closer := `|$)`
+				if s.opts.StrictSlashes {
+					closer = `)`
+				}
+				s.prev.output = out(s.globstarBody + closer)
 				s.prev.value = append(s.prev.value, value...)
 				s.globstar = true
 				s.output = append(s.output, *prior.output...)
@@ -1413,18 +1453,39 @@ func (s *scanner) run() error {
 		// slice would be appended to in place by the guard below.
 		tok := &token{typ: "star", value: value, output: out(s.star)}
 
-		// parse.js:1248 (opts.bash) and :1257 (opts.regex === false with a
-		// bracket or paren prev) cannot be reached under default options. Both
-		// prev.types now exist, so the sites are live the moment options are
-		// threaded through. Marked, not written.
+		// parse.js:1248. Under opts.bash the star's output is always ".*?"
+		// rather than `star`, gaining the nodot prefix when it opens a path
+		// segment — a *different* guard from the one at :1263 below (that one
+		// tests state.index === state.start too, not just bos/slash), and this
+		// arm returns before reaching it.
+		if s.opts.Bash {
+			bashOutput := ".*?"
+			if s.prev.typ == "bos" || s.prev.typ == "slash" {
+				bashOutput = s.nodot + bashOutput
+			}
+			tok.output = out(bashOutput)
+			s.push(tok)
+			if s.err != nil {
+				return s.err
+			}
+			continue
+		}
+
+		// parse.js:1257 (opts.regex === true with a bracket or paren prev)
+		// cannot be reached under default options. Marked, not written.
 
 		// parse.js:1263. The test is state.index === state.start, not === 0:
 		// start moves past a negation prologue and past a "./" that survived
 		// behind one, so "!*" and "!./*" take this arm at index 1 and 3.
 		if s.index == s.start || s.prev.typ == "slash" || s.prev.typ == "dot" {
-			guard := s.nodot // opts.dot selects noDotsSlash at parse.js:1270
-			if s.prev.typ == "dot" {
+			var guard string
+			switch {
+			case s.prev.typ == "dot":
 				guard = s.chars.noDotSlash
+			case s.opts.Dot:
+				guard = s.chars.noDotsSlash
+			default:
+				guard = s.nodot
 			}
 			s.starGuard(guard)
 
@@ -1470,7 +1531,7 @@ func (s *scanner) run() error {
 
 	// parse.js:1304-1306, opts.strictSlashes. Both producers of those types are
 	// now built, so both arms are live.
-	if s.prev.typ == "star" || s.prev.typ == "bracket" {
+	if !s.opts.StrictSlashes && (s.prev.typ == "star" || s.prev.typ == "bracket") {
 		s.push(&token{typ: "maybe_slash", value: units{}, output: out(s.chars.slashLiteral + "?")})
 		if s.err != nil {
 			return s.err

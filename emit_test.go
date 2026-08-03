@@ -148,7 +148,10 @@ const (
 // lands, which is the same day it earns a field on internal/parse.Options — the
 // two lists are kept in step by emitParseOptions failing to compile otherwise.
 var emitAnsweredOptions = map[string]bool{
-	"windows": true, // constants.globChars, parse.js:377
+	"windows":       true, // constants.globChars, parse.js:377
+	"bash":          true, // parse.js:401, :675, :1156, :1248
+	"strictSlashes": true, // parse.js:1193, :1304
+	"dot":           true, // parse.js:396, :399, :1041, :1270
 }
 
 // emitParseOptions converts a record's recorded options into the ones
@@ -168,7 +171,12 @@ func emitParseOptions(o *emitcase.Options) (parse.Options, string) {
 	// value, and treating its presence as truth would parse it for the wrong
 	// platform. It is set-ness that decides attemptability and the value that
 	// decides the table.
-	return parse.Options{Windows: o.Windows != nil && *o.Windows}, ""
+	return parse.Options{
+		Windows:       o.Windows != nil && *o.Windows,
+		Bash:          o.Bash != nil && *o.Bash,
+		StrictSlashes: o.StrictSlashes != nil && *o.StrictSlashes,
+		Dot:           o.Dot != nil && *o.Dot,
+	}, ""
 }
 
 func TestEmitParity(t *testing.T) {
@@ -593,7 +601,10 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 	// manufacturing a thousand false disagreements on its first run.
 	t.Run("non-default options are unbuilt, blamed on the option", func(t *testing.T) {
 		var opts emitcase.Options
-		if err := json.Unmarshal([]byte(`{"dot":true,"windows":true}`), &opts); err != nil {
+		// posix, not dot: dot is threaded through now, so a dot record is
+		// attempted rather than blocked, and using it here would test the
+		// opposite of what this case is for.
+		if err := json.Unmarshal([]byte(`{"posix":true,"windows":true}`), &opts); err != nil {
 			t.Fatalf("decode options: %v", err)
 		}
 		c := base()
@@ -602,8 +613,8 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 		// Both keys are set and only one is expressible, so the blocker names the
 		// one that is not — sorted order would otherwise report opts.windows and
 		// claim a threaded key is what is missing.
-		if blocker != "opts.dot" {
-			t.Fatalf("blocker = %q, want %q (detail %q)", blocker, "opts.dot", detail)
+		if blocker != "opts.posix" {
+			t.Fatalf("blocker = %q, want %q (detail %q)", blocker, "opts.posix", detail)
 		}
 	})
 }
@@ -620,17 +631,18 @@ func TestReplayEmitSetTallies(t *testing.T) {
 		t.Fatalf("Parse(%q): %v", pattern, err)
 	}
 
-	// opts.dot, not opts.windows: windows is threaded through now, so a windows
-	// record is attempted rather than blocked, and using it here would test the
-	// opposite of what this case is for. Whatever key stands in has to be one
-	// emitAnsweredOptions does not carry — TestEmitAnsweredOptionsAreThreaded
-	// fails if this one ever becomes expressible and nobody updates it.
+	// opts.posix, not opts.windows or opts.dot: both of those are threaded
+	// through now, so a record carrying either is attempted rather than
+	// blocked, and using one here would test the opposite of what this case
+	// is for. Whatever key stands in has to be one emitAnsweredOptions does
+	// not carry — TestEmitAnsweredOptionsAreThreaded fails if this one ever
+	// becomes expressible and nobody updates it.
 	var blocking emitcase.Options
-	if err := json.Unmarshal([]byte(`{"dot":true}`), &blocking); err != nil {
+	if err := json.Unmarshal([]byte(`{"posix":true}`), &blocking); err != nil {
 		t.Fatalf("decode options: %v", err)
 	}
-	if _, unexpressible := emitParseOptions(&blocking); unexpressible != "dot" {
-		t.Fatalf("opts.dot is expressible now (%q); this case needs a key the port still cannot pass", unexpressible)
+	if _, unexpressible := emitParseOptions(&blocking); unexpressible != "posix" {
+		t.Fatalf("opts.posix is expressible now (%q); this case needs a key the port still cannot pass", unexpressible)
 	}
 
 	inline := emitcase.PathInline
@@ -676,9 +688,9 @@ func TestReplayEmitSetTallies(t *testing.T) {
 	}
 
 	// The blocker label is the build order, so its form is part of the contract.
-	if got := rep.UnbuiltByBlocker["scannerOutput (opts.dot)"]; got != 1 {
+	if got := rep.UnbuiltByBlocker["scannerOutput (opts.posix)"]; got != 1 {
 		t.Errorf("unbuiltByBlocker[%q] = %d, want 1 (got %v)",
-			"scannerOutput (opts.dot)", got, rep.UnbuiltByBlocker)
+			"scannerOutput (opts.posix)", got, rep.UnbuiltByBlocker)
 	}
 
 	if s := rep.ByOptions[emitDefaultOptions]; s == nil || s.Fields != 10 || s.Matched != 3 {
