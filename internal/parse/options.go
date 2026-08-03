@@ -62,6 +62,43 @@ type Options struct {
 	// comment on scanner's star/nodot/globstarBody fields — because its only
 	// reader (:620) is the inline fast path this package does not have.
 	Dot bool
+
+	// NoExtglob turns off every extglob opener. Five sites test it, all of them
+	// `opts.noextglob !== true` and all of them the *first* arm of their branch:
+	// parse.js:1023 ("?("), :1054 ("!("), :1072 ("+("), :1096 ("@(") and :1140
+	// ("*(", spelled as a regexp over two characters rather than a peek pair).
+	// Turning it on does not error — each site falls through to the arm that
+	// treats the character as itself.
+	NoExtglob bool
+
+	// NoExt is minimatch's spelling of NoExtglob, and it is not an alias. The
+	// merge at parse.js:408 is guarded by `typeof opts.noext === 'boolean'`, so
+	// `{NoExtglob: true, NoExt: &false}` turns extglobs back *on* where leaving
+	// NoExt unset leaves them off. Unset is a third state, hence the pointer.
+	NoExt *bool
+
+	// Posix is read twice, with two different tests, so unset is a third state
+	// here too — and the two defaults point opposite ways:
+	//
+	//	:719  `opts.posix !== false` gates the POSIX character-class rewrite
+	//	      ("[[:alpha:]]" -> its source), which is therefore live unless the
+	//	      caller explicitly passes false.
+	//	:751  `opts.posix === true` rewrites a "!" directly after "[" into "^",
+	//	      which is therefore dead unless the caller explicitly passes true.
+	//
+	// Both sites are inside the character-class body branch, twenty lines apart.
+	Posix *bool
+
+	// Regex is the same shape as Posix: two reads, two tests, two defaults.
+	//
+	//	:1077  `opts.regex === false` makes "+" emit PLUS_LITERAL even where the
+	//	       preceding token is not "(" — it joins an || whose other half is
+	//	       live by default, so false widens an existing arm rather than
+	//	       opening a new one.
+	//	:1257  `opts.regex === true` gives a star directly after a bracket or
+	//	       paren token its own raw value as output, so the "*" reads as the
+	//	       caller's quantifier rather than as a glob.
+	Regex *bool
 }
 
 // isDefault reports whether o selects every upstream default, so a caller can

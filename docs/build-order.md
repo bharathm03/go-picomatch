@@ -157,10 +157,10 @@ sequenced here, because both are sequenced in
 
 **The option surface.** Every `opts.X` branch the defaults do not take is marked
 at its site with the key that selects it, until the day it is written.
-`grep -n "opts\." internal/parse/*.go` finds what is left: `capture`, `posix`,
-`strictBrackets`, `nobrace`, `nobracket`, `noextglob`, `noglobstar`, `nonegate`,
-`unescape`, `keepQuotes`, `regex`, `literalBrackets`, `maxExtglobRecursion`,
-`prepend` and `expandRange`. Three of those need an answer before the code:
+`grep -n "opts\." internal/parse/*.go` finds what is left: `capture`,
+`strictBrackets`, `nobrace`, `nobracket`, `noglobstar`, `nonegate`, `unescape`,
+`keepQuotes`, `literalBrackets`, `maxExtglobRecursion`, `prepend` and
+`expandRange`. Three of those need an answer before the code:
 `literalBrackets` is tested against both `=== false` and `=== true` so unset is
 a third state ([DECISIONS.md](../DECISIONS.md) §2 already has it as a `*bool`);
 `maxExtglobRecursion` takes a number or `false`; and `expandRange` is a
@@ -181,11 +181,26 @@ The 324 windows-only pairs, plus the 235/116/207 these three added on top, take
 the scanner layer 50.11% → **93.48%** and the headline 18.73% → **34.95%**, at
 **0 wrong** throughout.
 
-What is next by pairs: `posix` (65), `regex` (52), `noextglob` (20), then a
-tail ending at 1. Neither `posix` nor `regex` is a table swap; they also
-combine with `strictSlashes` on 51 pairs that building all four keys above did
-not realize, so re-run the solo-count query in emit-oracle.md §4 rather than
-trusting raw pairs again.
+`NoExtglob`, `NoExt`, `Posix` and `Regex` are **written** as well, and as one
+batch: 51 of `regex`'s 52 pairs also set `posix`, so its solo count is **1** —
+the sharpest raw-vs-solo gap in the surface, and the reason ranking these three
+against each other would have been the wrong move. `NoExtglob` is a plain bool
+(`!== true` at all five sites, parse.js:1023/:1054/:1072/:1096/:1140), `NoExt` a
+`*bool` because parse.js:408 merges it over `NoExtglob` only when it is a
+boolean, and `Posix` and `Regex` `*bool` because each is read twice under two
+different tests (:719/:751 and :1077/:1257) whose defaults point opposite ways.
+Together: scanner layer 93.48% → **97.76%**, headline 34.95% → **36.55%**,
+**1,989 of 2,038** pairs attemptable, **0 wrong**.
+
+**What is next is not another option key.** 49 pairs remain blocked, spread over
+thirteen blockers topping out at 7, and 11 of them are `nocase`/`flags` —
+compile-layer keys whose only reader in all of `lib/` is `picomatch.js:343`, so
+no branch of `internal/parse` can ever reach them. The scanner layer's last 91
+fields are worth less than any one of the three layers still at zero:
+`fastpath` (728 fields, `parse.fastpaths()`), `compile` (4,056, `compileRe` and
+`toRegex`) and `path` (2,028, the selector at picomatch.js:312-316). `compile`
+needs a DECISIONS.md entry before code — §1 established this port has no
+`MakeRe`, and `source`/`flags` are a regex the port never compiles.
 
 Two things `windows` established that carried forward. The Windows constants
 table is **four** leaves and twelve derivations, not two, and the leaf that

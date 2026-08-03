@@ -152,6 +152,10 @@ var emitAnsweredOptions = map[string]bool{
 	"bash":          true, // parse.js:401, :675, :1156, :1248
 	"strictSlashes": true, // parse.js:1193, :1304
 	"dot":           true, // parse.js:396, :399, :1041, :1270
+	"noextglob":     true, // parse.js:1023, :1054, :1072, :1096, :1140
+	"noext":         true, // parse.js:408, merged over noextglob
+	"posix":         true, // parse.js:719 (!== false), :751 (=== true)
+	"regex":         true, // parse.js:1077 (=== false), :1257 (=== true)
 }
 
 // emitParseOptions converts a record's recorded options into the ones
@@ -171,11 +175,19 @@ func emitParseOptions(o *emitcase.Options) (parse.Options, string) {
 	// value, and treating its presence as truth would parse it for the wrong
 	// platform. It is set-ness that decides attemptability and the value that
 	// decides the table.
+	//
+	// Posix, Regex and NoExt are the exception that proves the rule: each is read
+	// twice upstream under two different tests, so unset is a third state and the
+	// pointer is carried through rather than collapsed.
 	return parse.Options{
 		Windows:       o.Windows != nil && *o.Windows,
 		Bash:          o.Bash != nil && *o.Bash,
 		StrictSlashes: o.StrictSlashes != nil && *o.StrictSlashes,
 		Dot:           o.Dot != nil && *o.Dot,
+		NoExtglob:     o.NoExtglob != nil && *o.NoExtglob,
+		NoExt:         o.NoExt,
+		Posix:         o.Posix,
+		Regex:         o.Regex,
 	}, ""
 }
 
@@ -601,10 +613,13 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 	// manufacturing a thousand false disagreements on its first run.
 	t.Run("non-default options are unbuilt, blamed on the option", func(t *testing.T) {
 		var opts emitcase.Options
-		// posix, not dot: dot is threaded through now, so a dot record is
-		// attempted rather than blocked, and using it here would test the
-		// opposite of what this case is for.
-		if err := json.Unmarshal([]byte(`{"posix":true,"windows":true}`), &opts); err != nil {
+		// nocase, and not one of the scanner keys: every key this case has used
+		// so far has since been threaded, and the fix each time was to pick
+		// another. nocase cannot be threaded — `grep -n "\.nocase"
+		// tests/original/lib/*.js` finds one site, picomatch.js:343, in the
+		// compile layer, so lib/parse.js never reads it and no branch of
+		// internal/parse can ever earn a field for it.
+		if err := json.Unmarshal([]byte(`{"nocase":true,"windows":true}`), &opts); err != nil {
 			t.Fatalf("decode options: %v", err)
 		}
 		c := base()
@@ -613,8 +628,8 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 		// Both keys are set and only one is expressible, so the blocker names the
 		// one that is not — sorted order would otherwise report opts.windows and
 		// claim a threaded key is what is missing.
-		if blocker != "opts.posix" {
-			t.Fatalf("blocker = %q, want %q (detail %q)", blocker, "opts.posix", detail)
+		if blocker != "opts.nocase" {
+			t.Fatalf("blocker = %q, want %q (detail %q)", blocker, "opts.nocase", detail)
 		}
 	})
 }
@@ -631,18 +646,17 @@ func TestReplayEmitSetTallies(t *testing.T) {
 		t.Fatalf("Parse(%q): %v", pattern, err)
 	}
 
-	// opts.posix, not opts.windows or opts.dot: both of those are threaded
-	// through now, so a record carrying either is attempted rather than
-	// blocked, and using one here would test the opposite of what this case
-	// is for. Whatever key stands in has to be one emitAnsweredOptions does
-	// not carry — TestEmitAnsweredOptionsAreThreaded fails if this one ever
-	// becomes expressible and nobody updates it.
+	// opts.nocase, and deliberately not a scanner key: the stand-in has to be
+	// one emitAnsweredOptions will never carry, or this case quietly inverts on
+	// the day that key is threaded. nocase qualifies permanently — its only
+	// reader in the whole of lib/ is picomatch.js:343, in the compile layer, so
+	// lib/parse.js never sees it. The guard below still fires if that changes.
 	var blocking emitcase.Options
-	if err := json.Unmarshal([]byte(`{"posix":true}`), &blocking); err != nil {
+	if err := json.Unmarshal([]byte(`{"nocase":true}`), &blocking); err != nil {
 		t.Fatalf("decode options: %v", err)
 	}
-	if _, unexpressible := emitParseOptions(&blocking); unexpressible != "posix" {
-		t.Fatalf("opts.posix is expressible now (%q); this case needs a key the port still cannot pass", unexpressible)
+	if _, unexpressible := emitParseOptions(&blocking); unexpressible != "nocase" {
+		t.Fatalf("opts.nocase is expressible now (%q); this case needs a key the port still cannot pass", unexpressible)
 	}
 
 	inline := emitcase.PathInline
@@ -688,9 +702,9 @@ func TestReplayEmitSetTallies(t *testing.T) {
 	}
 
 	// The blocker label is the build order, so its form is part of the contract.
-	if got := rep.UnbuiltByBlocker["scannerOutput (opts.posix)"]; got != 1 {
+	if got := rep.UnbuiltByBlocker["scannerOutput (opts.nocase)"]; got != 1 {
 		t.Errorf("unbuiltByBlocker[%q] = %d, want 1 (got %v)",
-			"scannerOutput (opts.posix)", got, rep.UnbuiltByBlocker)
+			"scannerOutput (opts.nocase)", got, rep.UnbuiltByBlocker)
 	}
 
 	if s := rep.ByOptions[emitDefaultOptions]; s == nil || s.Fields != 10 || s.Matched != 3 {

@@ -62,10 +62,21 @@ and the headline 24.69% → **34.95%**, at **0 wrong**. `docs/emit-oracle.md` §
 holds the derivation and site inventory; re-derive from
 `testdata/emit/summary.json` rather than trusting either file.
 
-What's left of the option surface: `posix` (65 pairs), `regex` (52),
-`noextglob` (20), then a tail ending at 1. None is a table swap the way
-`windows` was; `posix` and `regex` also combine with `strictSlashes` on 51
-pairs neither of these three keys realized.
+`posix`, `regex`, `noextglob` and `noext` are **done** too, and as one batch
+rather than ranked against each other: 51 of `regex`'s 52 pairs also set
+`posix`, so building either alone realizes almost nothing. `posix` and `regex`
+are each read twice under two *different* tests (`!== false` and `=== true`;
+`=== false` and `=== true`), so unset is a genuine third state and both are
+`*bool`, like `LiteralBrackets`. `noext` is not a separate branch — parse.js:408
+merges it over `noextglob` only when it is a boolean. Together they take the
+scanner layer 93.48% → **97.76%** and the headline 34.95% → **36.55%**, at
+**0 wrong**, with **1,989 of 2,038** pairs now attemptable.
+
+**The option surface is no longer where the score is.** 49 pairs remain blocked
+and 11 of them are on `nocase`/`flags`, compile-layer keys `lib/parse.js` never
+reads, so no scanner branch can ever unblock them. The scanner layer's last 91
+fields are worth less than any one of the three untouched layers: `fastpath`
+(728 fields), `compile` (4,056) and `path` (2,028), all at zero.
 
 The decline rule still governs everything added from here. Never fall back to
 plausible output: a plausible-but-wrong token stream scores as a pass wherever the
@@ -172,7 +183,7 @@ emitter under default options** has been gated at 1,491/1,491 all along.
 `testdata/emit` adds the three layers that were unmeasured — non-default options,
 `parse.fastpaths()`, and `compileRe`'s `^(?:…)$` wrap and flags. It scores
 **fields, not cases**, across 2,038 (pattern, options) pairs, and reads
-`2686 of 10879 = 24.69%, 0 wrong` today: the scanner layer at 66.04% and the
+`3976 of 10879 = 36.55%, 0 wrong` today: the scanner layer at 97.76% and the
 other three at zero. See `docs/emit-oracle.md`.
 
 ### Three fixture sets, never merged

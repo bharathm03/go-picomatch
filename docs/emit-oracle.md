@@ -122,7 +122,7 @@ Two axes are missing, not one, and they are worth **roughly the same**:
 
 | If you built… | Fields won | of 10,879 |
 |---|---:|---:|
-| nothing more than today | 2,686 | **24.69%** |
+| nothing more than today | 3,976 | **36.55%** |
 | defaults only, all three layers | 5,414 | 49.77% |
 | all options, scanner only | 4,067 | 37.38% |
 
@@ -133,13 +133,13 @@ the thing that decides it.
 The first row is what `make emit` prints today:
 
 ```
-cases=2038 fields=10879 matched=2686 unbuilt=8193 wrong=0 emitter=24.69%
-  layer    scanner            2686 of 4067 matched (66.04%)
+cases=2038 fields=10879 matched=3976 unbuilt=6903 wrong=0 emitter=36.55%
+  layer    scanner            3976 of 4067 matched (97.76%)
   layer    fastpath           0 of 728 matched (0.00%)
   layer    compile            0 of 4056 matched (0.00%)
   layer    path               0 of 2028 matched (0.00%)
   options  defaultOptions     2038 of 5414 matched (37.64%)
-  options  nonDefaultOptions  648 of 5465 matched (11.86%)
+  options  nonDefaultOptions  1938 of 5465 matched (35.46%)
 ```
 
 2,038 of those fields are the default-options `scannerOutput` and `negated` pair
@@ -148,11 +148,14 @@ the scanner throws — and the `defaultOptions` stratum's 5,414 *is* the
 defaults-only ceiling in the table above, printed by the gate itself. Every point
 of that 18.73% was **already proven by `make tokens`**.
 
-The other 648 are `windows`, threaded in §4 below: 288 `scannerOutput`, 324
-`negated` and 36 `scannerThrow` over the 324 pairs whose only option is that key.
-That is the first score on this gate `make tokens` had not already proved, and
-the first number a floor can usefully sit under — `PICOMATCH_EMIT_MIN` is worth
-setting now, which it was not before.
+The other 1,938 are the eight option keys threaded in §4 below — `windows`,
+`bash`, `strictSlashes`, `dot`, `noextglob`/`noext`, `posix` and `regex` — over
+the 969 of 1,018 non-default pairs that set none of the keys still unbuilt (a
+`scannerOutput`/`negated` pair each, plus `scannerThrow` where the scanner
+throws). That is the
+part of this gate's score `make tokens` had not already proved, and the number a
+floor can usefully sit under: `PICOMATCH_EMIT_MIN` is worth setting now, which it
+was not before the first of those keys landed.
 
 Everything else is unbuilt for a stated reason, and the gate must record it as
 `unbuilt` rather than `wrong`: a record carrying an option `internal/parse.Options`
@@ -330,6 +333,70 @@ not re-derived, at every one of its five call sites: building `dot`'s reshape
 of that one binding was enough for `strictSlashes`'s already-built closer
 logic to compose with it correctly.
 
+### The fourth batch: `posix`, `regex`, `noextglob` (and `noext`)
+
+With those four answered the remaining surface is 136 pairs, and the same
+solo-vs-raw query says the shape has changed: the tail is now nearly flat, and
+one combination dominates it.
+
+| Key | Solo (on top of the four) | Raw pairs | Combines with |
+|---|---:|---:|---|
+| `posix` | 14 | 65 | `regex` (51 pairs set both and nothing else) |
+| `regex` | 1 | 52 | `posix` (the same 51) |
+| `noextglob` | **20** | 20 | nothing |
+
+`regex`'s raw 52 is almost entirely the `posix`+`regex` pair — building it alone
+realizes **one** pair. That is the sharpest raw-vs-solo gap in the whole surface,
+and the reason these three are worth building as one batch rather than ranked
+against each other: together they unblock 51 + 20 + 14 + 1 = 86, plus the single
+`noext` pair, where any two of them leave most of it on the table.
+
+`noext` comes along because it is not a separate branch. parse.js:408 merges it
+over `noextglob` when — and only when — it is a boolean, so `{noextglob: true,
+noext: false}` turns extglobs back *on*. It is one `if` at setup and it shares
+every reader site with the key it overwrites.
+
+**Both `posix` and `regex` are read twice under two different tests**, which
+makes each a genuine third state and each `*bool` on `Options`, alongside
+`LiteralBrackets` and `MaxExtglobRecursion`:
+
+| Key | Site | Test | Default answer |
+|---|---|---|---|
+| `posix` | parse.js:719 | `!== false` | live — POSIX classes rewrite unless told not to |
+| `posix` | parse.js:751 | `=== true` | dead — `"[!"` stays `"[!"` unless told otherwise |
+| `regex` | parse.js:1077 | `=== false` | dead, but it is the second half of an `\|\|` whose first half is live |
+| `regex` | parse.js:1257 | `=== true` | dead |
+
+Reading either as a plain `bool` gets one of its two sites wrong in the zero
+value, which is the failure mode `Options`' doc comment exists to prevent. The
+scanner resolves each into two separately named fields (`posixClasses`,
+`posixNegate`, `regexFalse`, `regexTrue`) at setup for the same reason.
+
+`noextglob` by contrast is `!== true` at all five of its sites (parse.js:1023,
+:1054, :1072, :1096 and :1140 — the last spelled as a regexp over two characters
+rather than a peek pair), so a plain `bool` is exactly right, and every site is
+the *first* arm of its branch: turning it on does not error, each character just
+falls through to the arm that treats it as itself.
+
+**All four are now done.** Measured: **1,989 of 2,038** pairs attemptable
+(97.60%), **0 wrong**. Every one of the 87 newly attemptable pairs matched on
+both its scanner fields — matched went 3,802 → 3,976, which is exactly 87 × 2 —
+taking the scanner layer 93.48% → **97.76%** and the headline 34.95% →
+**36.55%**. No `transcription-traps.md` entry: the only site that reads at all
+oddly is parse.js:1077, where `opts.regex === false` widens an arm that is
+already live rather than opening a new one, and that is recorded in the
+`Options.Regex` doc comment where the field is.
+
+**What is left is 49 pairs and no longer a scanner story.** The blockers are
+`noglobstar` 7, `strictBrackets` 6, `maxExtglobRecursion` 6, `unescape` 6,
+`nocase` 5, `nobrace` 5, `flags`+`nocase` 3, `flags` 3, then five more blockers
+carrying eight pairs between them. `nocase` and `flags` are compile-layer keys — their only reader in all of
+`lib/` is `picomatch.js:343` — so no branch of `internal/parse` can ever unblock
+them, and 11 of the 49 are theirs. The scanner layer's remaining 91 fields are
+worth less than any one of the three untouched layers, and the ranking that
+matters from here is `fastpath` (728 fields), `compile` (4,056) and `path`
+(2,028), not another option key.
+
 **The record-level ranking in an earlier draft does not reproduce** (`windows`
 3240, `strictSlashes` 1840, `dot` 1668, `bash` 1132, `regex` 300, `posix` 296,
 `unescape` 70 …). The measured record counts are the right-hand column above, and
@@ -370,7 +437,7 @@ const attemptable=ans=>r.filter(x=>Object.keys(x.options).every(k=>ans.has(k))).
 const pct=n=>(100*n/r.length).toFixed(2)+'%';
 const ans=new Set(['windows']);
 console.log('windows only', attemptable(ans), pct(attemptable(ans)));
-for (const k of ['bash','strictSlashes','dot']) {
+for (const k of ['bash','strictSlashes','dot','noextglob','noext','posix','regex']) {
   const before=attemptable(ans); ans.add(k); const after=attemptable(ans);
   console.log('+'+k, after, pct(after), 'delta', after-before);
 }
@@ -378,6 +445,22 @@ const solo=(k, base)=>r.filter(x=>{const e=Object.keys(x.options).filter(o=>!bas
 console.log('solo bash (on windows)', solo('bash', new Set(['windows'])));
 console.log('solo dot (on windows)', solo('dot', new Set(['windows'])));
 console.log('solo strictSlashes (on windows)', solo('strictSlashes', new Set(['windows'])));
+"
+```
+
+The fourth batch's solo figures, and what remains blocked after it — the same
+query with the eight answered keys as the base. This is the authority for the
+`posix`/`regex`/`noextglob` table above and for the 49-pair remainder:
+
+```bash
+node -e "
+const built=new Set(['windows','bash','strictSlashes','dot','noextglob','noext','posix','regex']);
+const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').trim().split('\n').map(JSON.parse);
+const rem={};let a=0;
+for(const c of r){const u=Object.keys(c.options).filter(k=>!built.has(k));
+  if(!u.length){a++;continue} const s=u.slice().sort().join('+'); rem[s]=(rem[s]||0)+1;}
+console.log('attemptable',a,'of',r.length,(100*a/r.length).toFixed(2)+'%');
+console.log(Object.entries(rem).sort((x,y)=>y[1]-x[1]));
 "
 ```
 

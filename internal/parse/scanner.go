@@ -199,6 +199,20 @@ type scanner struct {
 	nodot        string
 	globstarBody string
 
+	// noextglob, posixClasses, posixNegate, regexFalse and regexTrue are the
+	// same idea for the three keys whose sites are scattered through the loop
+	// rather than folded into a binding upstream. They are resolved here for the
+	// same reason `opts` says not to reach for it mid-loop: noextglob is a merge
+	// (parse.js:408, which upstream performs once, before the loop, by mutating
+	// opts), and posix and regex are each read twice with *different* tests, so
+	// naming the two answers separately is what keeps a site from picking the
+	// wrong default.
+	noextglob    bool
+	posixClasses bool // opts.posix !== false, parse.js:719
+	posixNegate  bool // opts.posix === true,  parse.js:751
+	regexFalse   bool // opts.regex === false, parse.js:1077
+	regexTrue    bool // opts.regex === true,  parse.js:1257
+
 	backtrack      bool
 	negated        bool
 	globstar       bool
@@ -288,6 +302,22 @@ func newScannerUnits(input units, opts Options) *scanner {
 		// that half stays unbuilt.
 		s.star = s.globstarBody
 	}
+
+	// parse.js:408-410. The minimatch spelling wins only when it is a boolean,
+	// so `noext: false` cancels `noextglob: true` while an absent noext leaves
+	// noextglob alone. Upstream writes the answer back onto opts, which is why
+	// every one of the five reader sites can spell the test `opts.noextglob`.
+	s.noextglob = opts.NoExtglob
+	if opts.NoExt != nil {
+		s.noextglob = *opts.NoExt
+	}
+	// parse.js:719 and :751. One key, two tests, two different defaults: an
+	// unset posix takes the class rewrite and not the "[!" rewrite.
+	s.posixClasses = opts.Posix == nil || *opts.Posix
+	s.posixNegate = opts.Posix != nil && *opts.Posix
+	// parse.js:1077 and :1257, the same shape again.
+	s.regexFalse = opts.Regex != nil && !*opts.Regex
+	s.regexTrue = opts.Regex != nil && *opts.Regex
 
 	// parse.js:430, utils.removePrefix. This runs before the loop, so the rest
 	// of the scanner never sees a leading "./" and state.consumed is not a
@@ -643,7 +673,7 @@ func (s *scanner) run() error {
 			// `posix: false` turns it off. The other reader of the same key,
 			// twenty lines down at :751, is `opts.posix === true` — one option,
 			// two default answers.
-			if isUnit(value, ':') { // opts.posix !== false
+			if s.posixClasses && isUnit(value, ':') {
 				inner := sliceFrom(s.prev.value, 1)
 				if inner.contains('[') {
 					// parse.js:722. Set on the *outer* test, so a name that
@@ -709,8 +739,17 @@ func (s *scanner) run() error {
 				value = escapePrefix(value)
 			}
 
-			// parse.js:751-753, opts.posix === true rewrites "[!" to "[^".
-			// Marked, not written.
+			// parse.js:751-753. Under `posix: true` a "!" directly after a bare
+			// "[" becomes "^". It replaces value rather than prefixing it, so
+			// the "!" is gone from prev.value and from the emitted token both —
+			// the class is negated, not negated-and-literal.
+			//
+			// The test is prev.value === "[" exactly, so only the first unit of
+			// the body can take it: "[a!]" keeps its "!". And it runs after the
+			// two escape arms above, neither of which can fire on "!".
+			if s.posixNegate && isUnit(value, '!') && s.prev.value.equal(encode("[")) {
+				value = encode("^")
+			}
 
 			// parse.js:755-756. The body accumulates onto the bracket token one
 			// value at a time and never pushes, so a body is mid-surrogate
@@ -1105,7 +1144,7 @@ func (s *scanner) run() error {
 		// prev.value, :1028 and :1040 read prev.type.
 		if c == '?' {
 			isGroup := s.prev != nil && s.prev.value.equal(encode("("))
-			if !isGroup && s.peekIs(1, '(') && !s.peekIs(2, '?') { // opts.noextglob
+			if !isGroup && !s.noextglob && s.peekIs(1, '(') && !s.peekIs(2, '?') {
 				s.extglobOpen("qmark", value)
 				if s.err != nil {
 					return s.err
@@ -1168,7 +1207,7 @@ func (s *scanner) run() error {
 		// a "!" that is neither an extglob opener nor at index 0 drops out of
 		// this branch and is picked up as plain text below.
 		if c == '!' {
-			if s.peekIs(1, '(') { // opts.noextglob
+			if !s.noextglob && s.peekIs(1, '(') {
 				if !s.peekIs(2, '?') || !isLookaroundIntro(s.peek(3)) {
 					s.extglobOpen("negate", value)
 					if s.err != nil {
@@ -1187,14 +1226,18 @@ func (s *scanner) run() error {
 		// value and output, the second neither, and the third puts the escape in
 		// value and sets no output at all. Trap #3.
 		if c == '+' {
-			if s.peekIs(1, '(') && !s.peekIs(2, '?') { // opts.noextglob
+			if !s.noextglob && s.peekIs(1, '(') && !s.peekIs(2, '?') {
 				s.extglobOpen("plus", value)
 				if s.err != nil {
 					return s.err
 				}
 				continue
 			}
-			if s.prev != nil && s.prev.value.equal(encode("(")) { // opts.regex === false
+			// parse.js:1077. `opts.regex === false` is the *second* half of an ||
+			// whose first half is live by default, so it widens this arm rather
+			// than opening a new one: every "+" emits PLUS_LITERAL, not just the
+			// one directly after a "(".
+			if (s.prev != nil && s.prev.value.equal(encode("("))) || s.regexFalse {
 				s.push(&token{typ: "plus", value: value, output: out(s.chars.plusLiteral)})
 				if s.err != nil {
 					return s.err
@@ -1217,7 +1260,7 @@ func (s *scanner) run() error {
 
 		// At. parse.js:1095-1103.
 		if c == '@' {
-			if s.peekIs(1, '(') && !s.peekIs(2, '?') { // opts.noextglob
+			if !s.noextglob && s.peekIs(1, '(') && !s.peekIs(2, '?') {
 				s.push(&token{typ: "at", extglob: true, value: value, output: out("")})
 				if s.err != nil {
 					return s.err
@@ -1268,11 +1311,11 @@ func (s *scanner) run() error {
 
 		rest := s.remaining()
 
-		// parse.js:1140, /^\([^?]/ — "*(" opens an extglob. opts.noextglob.
-		// Note this is spelled differently from its four siblings: it needs two
-		// characters, so a trailing "*(" falls through to the globstar arms
-		// where "+(" at the end of input still opens.
-		if isExtglobOpen(rest) {
+		// parse.js:1140, /^\([^?]/ — "*(" opens an extglob. Note this is spelled
+		// differently from its four siblings: it needs two characters, so a
+		// trailing "*(" falls through to the globstar arms where "+(" at the end
+		// of input still opens.
+		if !s.noextglob && isExtglobOpen(rest) {
 			s.extglobOpen("star", value)
 			if s.err != nil {
 				return s.err
@@ -1471,8 +1514,20 @@ func (s *scanner) run() error {
 			continue
 		}
 
-		// parse.js:1257 (opts.regex === true with a bracket or paren prev)
-		// cannot be reached under default options. Marked, not written.
+		// parse.js:1257. Under `regex: true` a star directly after a bracket or
+		// paren token gets its own raw value as output — the "*" is the caller's
+		// quantifier over the construct just closed, not a glob. Placed after
+		// the opts.bash arm above, as upstream places it, so bash wins where
+		// both are set.
+		if s.prev != nil && (s.prev.typ == "bracket" || s.prev.typ == "paren") && s.regexTrue {
+			output := value.clone()
+			tok.output = &output
+			s.push(tok)
+			if s.err != nil {
+				return s.err
+			}
+			continue
+		}
 
 		// parse.js:1263. The test is state.index === state.start, not === 0:
 		// start moves past a negation prologue and past a "./" that survived
