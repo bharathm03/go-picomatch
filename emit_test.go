@@ -40,6 +40,7 @@ import (
 	"testing"
 
 	picomatch "github.com/bharathm03/go-picomatch"
+	"github.com/bharathm03/go-picomatch/internal/compile"
 	"github.com/bharathm03/go-picomatch/internal/emitcase"
 	"github.com/bharathm03/go-picomatch/internal/parse"
 )
@@ -63,11 +64,16 @@ const (
 // the column that does not fail the run. So are `output` and `throw`, which the
 // census does not count at all — internal/emitcase.Case.Layers says why, and
 // compareEmitField will report either as a harness gap if that ever changes.
+//
+// `path`, `source` and `flags` left this map when internal/compile landed, and
+// they left it even though the port answers them on 1,134 of 2,038 records
+// rather than on all of them. A field belongs here only when there is NO entry
+// point at all; a field the port can sometimes answer has to be blocked
+// per-record by the comparison itself, or the records it *can* answer would
+// never be checked. compareCompileField is where that decision is made, and it
+// names what is missing rather than naming the layer.
 var emitBlockers = map[string]string{
-	emitcase.FieldPath:           "no path selector (picomatch.js:312-316)",
 	emitcase.FieldFastpathOutput: "no fastpaths pass (parse.js:1330)",
-	emitcase.FieldSource:         "no compileRe (picomatch.js:273)",
-	emitcase.FieldFlags:          "no toRegex (picomatch.js:343)",
 }
 
 // emitStratum is one stratum's count-matched-pct triple.
@@ -337,10 +343,113 @@ func compareEmitField(c *emitcase.Case, field string, st *parse.State, perr erro
 		return compareScannerField(c, field, st, perr)
 	}
 
+	switch field {
+	case emitcase.FieldPath, emitcase.FieldSource, emitcase.FieldFlags:
+		return compareCompileField(c, field, st, perr)
+	}
+
 	if b, ok := emitBlockers[field]; ok {
 		return "", b
 	}
 	return fmt.Sprintf("%s: recorded, but the harness neither compares it nor declares it unbuilt", field), ""
+}
+
+// emitCompileOptions converts a record's recorded options into internal/compile's.
+//
+// Unlike emitParseOptions this cannot fail, and the asymmetry is real rather than
+// convenient: the compile layer reads four keys and internal/compile.Options has
+// a field for each, so there is no key it can be handed and not express. What it
+// can lack is an OUTPUT to wrap, which is a different shortage and is reported
+// separately below.
+func emitCompileOptions(o *emitcase.Options) compile.Options {
+	return compile.Options{
+		Contains:    o.Contains != nil && *o.Contains,
+		NoCase:      o.NoCase != nil && *o.NoCase,
+		Flags:       derefOr(o.Flags, ""),
+		NoFastpaths: o.Fastpaths != nil && !*o.Fastpaths,
+	}
+}
+
+func derefOr(p *string, fallback string) string {
+	if p == nil {
+		return fallback
+	}
+	return *p
+}
+
+// compareCompileField replays `path`, `source` or `flags`.
+//
+// These three are answered on a subset of the records that carry them, so the
+// blocker is decided per record rather than declared once in emitBlockers. There
+// are two distinct shortages and they are reported as two distinct blockers,
+// because they rank differently in the build order:
+//
+//   - The path is not decidable. makeRe entered one of the two fast paths, and
+//     which one it ends up reporting depends on what that path RETURNED — 382
+//     patterns are eligible for the top path and 25 take it. Only parse.fastpaths
+//     can settle it. This blocks all three fields together, since the other two
+//     are computed from the output the path names.
+//   - The path is `none`, but internal/parse could not produce the output: either
+//     the record's options do not reach it, or it declined a construct. `path`
+//     is still answered — it does not depend on the output — while `source` and
+//     `flags` are blocked on whatever blocked the scanner.
+//
+// The second case is why source and flags are never answered on a record whose
+// scannerOutput is unbuilt. That is not caution; it is the dependency. Wrapping
+// an output the port did not produce would score the wrap against a guess.
+func compareCompileField(c *emitcase.Case, field string, st *parse.State, perr error) (detail, blocker string) {
+	copts := emitCompileOptions(&c.Options)
+
+	if !compile.PathFullScanner(c.Pattern, copts) {
+		return "", "needs parse.fastpaths (picomatch.js:313)"
+	}
+
+	if field == emitcase.FieldPath {
+		if c.Path == nil {
+			return "path: scored, but the record does not carry one", ""
+		}
+		if *c.Path != compile.PathNone {
+			return fmt.Sprintf("path: want %q, got %q", *c.Path, compile.PathNone), ""
+		}
+		return "", ""
+	}
+
+	// source and flags both come out of one toRegex call, so they are blocked
+	// together and answered together. Splitting them would let the port claim the
+	// flags of a regex it could not construct — the /$^/ fallback discards the
+	// requested flags with the regex that would have carried them.
+	if _, unexpressible := emitParseOptions(&c.Options); unexpressible != "" {
+		return "", "opts." + unexpressible
+	}
+	if unbuilt, ok := errors.AsType[*parse.UnsupportedError](perr); ok {
+		return "", fmt.Sprintf("%s (%s)", unbuilt.Construct, unbuilt.Site)
+	}
+	if perr != nil {
+		return "parse: " + perr.Error(), ""
+	}
+	if st == nil {
+		return "parse returned no state and no error", ""
+	}
+
+	src, flags := compile.ToRegex(compile.Source(st.Output, st.Negated, copts), copts)
+
+	switch field {
+	case emitcase.FieldSource:
+		if c.Source == nil {
+			return "source: scored, but the record does not carry one", ""
+		}
+		if *c.Source != src {
+			return fmt.Sprintf("source: want %q, got %q", *c.Source, src), ""
+		}
+	case emitcase.FieldFlags:
+		if !c.HasCompile() {
+			return "flags: scored, but the record did not reach compileRe", ""
+		}
+		if c.Flags != flags {
+			return fmt.Sprintf("flags: want %q, got %q", c.Flags, flags), ""
+		}
+	}
+	return "", ""
 }
 
 // compareScannerField compares one field the port's scanner does answer.
@@ -659,16 +768,23 @@ func TestReplayEmitSetTallies(t *testing.T) {
 		t.Fatalf("opts.nocase is expressible now (%q); this case needs a key the port still cannot pass", unexpressible)
 	}
 
-	inline := emitcase.PathInline
-	wrapped := "^(?:" + st.Output + ")$"
-	source := "^(?:" + wrapped + ")$"
+	// "a/b" contains a "/", so neither fast path is entered and the path is
+	// decidable — which is what lets this case exercise the compile fields at all.
+	// The recorded values are the port's own, and deliberately so: what is under
+	// test here is the SCORING LOOP, not the wrap. internal/compile's own tests
+	// pin the wrap against upstream, and TestEmitParity pins it against 2,028
+	// recorded records; a hand-written source here would only duplicate those less
+	// well.
+	none := emitcase.PathNone
+	wrapped := compile.Source(st.Output, st.Negated, compile.Options{})
+	src, flags := compile.ToRegex(wrapped, compile.Options{})
 
 	// Three records: one the port answers correctly, one it answers wrongly, and
 	// one it cannot attempt because the options never reach internal/parse.
 	right := emitcase.Case{
-		Pattern: pattern, Path: &inline, Output: &wrapped,
+		Pattern: pattern, Path: &none, Output: &wrapped,
 		ScannerOutput: ptr(st.Output), Negated: ptr(st.Negated),
-		Source: &source, Flags: "",
+		Source: &src, Flags: flags,
 	}
 	wrong := right
 	wrong.ScannerOutput = ptr(st.Output + "x")
@@ -681,16 +797,20 @@ func TestReplayEmitSetTallies(t *testing.T) {
 	if rep.Fields != 15 {
 		t.Fatalf("fields = %d, want 15", rep.Fields)
 	}
-	// right's scannerOutput and negated, plus wrong's negated — the perturbed
-	// record still answers everything the port has an entry point for.
-	if rep.Matched != 3 {
-		t.Errorf("matched = %d, want 3", rep.Matched)
+	// right answers all five; wrong answers four, since only its scannerOutput
+	// was perturbed; blocked answers one — its PATH, which needs neither the
+	// scanner nor an expressible option set. That last one is the assertion worth
+	// having: `path` is decided from the input alone, so an option internal/parse
+	// cannot express must not block it.
+	if rep.Matched != 10 {
+		t.Errorf("matched = %d, want 10", rep.Matched)
 	}
 	if rep.Wrong != 1 {
 		t.Errorf("wrong = %d, want 1", rep.Wrong)
 	}
-	if rep.Unbuilt != 11 {
-		t.Errorf("unbuilt = %d, want 11", rep.Unbuilt)
+	// blocked's scannerOutput, negated, source and flags.
+	if rep.Unbuilt != 4 {
+		t.Errorf("unbuilt = %d, want 4", rep.Unbuilt)
 	}
 	if len(rep.WrongFields) != rep.Wrong {
 		t.Errorf("wrongFields holds %d of %d wrong fields; the list is uncapped on purpose",
@@ -707,17 +827,22 @@ func TestReplayEmitSetTallies(t *testing.T) {
 			"scannerOutput (opts.nocase)", got, rep.UnbuiltByBlocker)
 	}
 
-	if s := rep.ByOptions[emitDefaultOptions]; s == nil || s.Fields != 10 || s.Matched != 3 {
-		t.Errorf("defaultOptions stratum = %+v, want 3 of 10", s)
+	if s := rep.ByOptions[emitDefaultOptions]; s == nil || s.Fields != 10 || s.Matched != 9 {
+		t.Errorf("defaultOptions stratum = %+v, want 9 of 10", s)
 	}
-	if s := rep.ByOptions[emitNonDefaultOptions]; s == nil || s.Fields != 5 || s.Matched != 0 {
-		t.Errorf("nonDefaultOptions stratum = %+v, want 0 of 5", s)
+	if s := rep.ByOptions[emitNonDefaultOptions]; s == nil || s.Fields != 5 || s.Matched != 1 {
+		t.Errorf("nonDefaultOptions stratum = %+v, want 1 of 5", s)
 	}
 	if s := rep.ByLayer[emitcase.LayerScanner]; s == nil || s.Fields != 6 || s.Matched != 3 {
 		t.Errorf("scanner stratum = %+v, want 3 of 6", s)
 	}
-	if s := rep.ByLayer[emitcase.LayerCompile]; s == nil || s.Matched != 0 {
-		t.Errorf("compile stratum = %+v, want 0 matched", s)
+	// right's pair and wrong's pair: the compile layer reads the port's own
+	// output, so perturbing the RECORDED scannerOutput does not perturb it.
+	if s := rep.ByLayer[emitcase.LayerCompile]; s == nil || s.Fields != 6 || s.Matched != 4 {
+		t.Errorf("compile stratum = %+v, want 4 of 6", s)
+	}
+	if s := rep.ByLayer[emitcase.LayerPath]; s == nil || s.Fields != 3 || s.Matched != 3 {
+		t.Errorf("path stratum = %+v, want 3 of 3", s)
 	}
 }
 
@@ -728,10 +853,7 @@ func TestReplayEmitSetTallies(t *testing.T) {
 // a decision rather than a default.
 func TestEmitAttemptabilityIsDeclared(t *testing.T) {
 	want := []string{
-		emitcase.FieldPath,
 		emitcase.FieldFastpathOutput,
-		emitcase.FieldSource,
-		emitcase.FieldFlags,
 	}
 	for _, field := range want {
 		if _, ok := emitBlockers[field]; !ok {
@@ -745,9 +867,17 @@ func TestEmitAttemptabilityIsDeclared(t *testing.T) {
 
 	// The fields the port CAN answer must stay out of the map. Adding one there
 	// would move a genuine disagreement into the column that does not fail.
-	for _, field := range []string{emitcase.FieldScannerOutput, emitcase.FieldNegated, emitcase.FieldScannerThrow} {
+	//
+	// The last three are answered on a subset of their records, and that is
+	// exactly why they must not be declared here: a blanket blocker would swallow
+	// the 1,134 the port does answer along with the 894 it does not, and the layer
+	// would read 0% whatever internal/compile did.
+	for _, field := range []string{
+		emitcase.FieldScannerOutput, emitcase.FieldNegated, emitcase.FieldScannerThrow,
+		emitcase.FieldPath, emitcase.FieldSource, emitcase.FieldFlags,
+	} {
 		if _, ok := emitBlockers[field]; ok {
-			t.Errorf("%q has an entry point in internal/parse; declaring it unbuilt would hide a real disagreement", field)
+			t.Errorf("%q has an entry point in the port; declaring it unbuilt would hide a real disagreement", field)
 		}
 	}
 

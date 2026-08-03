@@ -1674,6 +1674,54 @@ for (const [win, got] of [
 
 ---
 
+## 55. `!` closes the inline fast path without opening the top one — `parse.js:606` vs `picomatch.js:312`
+
+Two guards decide which of upstream's three parsers `makeRe` reaches, and they
+are written a line apart in the same call:
+
+```js
+// picomatch.js:312 — the top path
+if (options.fastpaths !== false && (input[0] === '.' || input[0] === '*'))
+
+// parse.js:606 — the inline path
+if (opts.fastpaths !== false && !/(^[*!]|[/()[\]{}"])/.test(input))
+```
+
+They look like one eligibility test spelled twice. They are not, and the
+character that separates them is `!`. A leading `*` shuts the inline door *and*
+opens the top one; a leading `!` shuts the inline door and opens nothing. So a
+negated pattern runs neither fast path, reaches the full scanner, and its
+recorded `path` is `none` — every negated pattern in the corpus, not by
+coincidence but by this asymmetry.
+
+The second reading inside the same regexp is a trap on its own. The `^` binds to
+the `[*!]` alternative only, not to the whole alternation. Simplifying it to a
+single character-set test over the string — the obvious tidy-up — makes `a*b`
+ineligible when upstream takes the inline path for it.
+
+**The wrong reading.** Treating "not fast-path eligible" as a single predicate
+and concluding `!abc` behaves like `*.js`. It costs nothing at the `path` field
+directly, because both readings happen to decline `*.js`; it costs the 59
+negated class-A records, which a merged predicate hands to a `parse.fastpaths`
+that never ran.
+
+**The one-way answer.** The deeper point is that neither guard settles the path
+on its own. `parse.fastpaths` is *called* at `picomatch.js:313` and its result
+tested at `:316`, so an eligible pattern whose output is falsy still falls
+through — 382 corpus patterns are eligible for the top path and 25 take it.
+Only the negative direction is decidable without running it: when neither guard
+opens, nothing ran, so there is nothing to have returned. `internal/compile`'s
+`PathFullScanner` answers in that direction alone, which is why the compile
+layer scores 1,134 of 2,028 records rather than all of them.
+
+Re-check — prints `{ classA: 1134, allRecordNone: true, negatedInClassA: 59 }`:
+
+```bash
+node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').trim().split(String.fromCharCode(10)).map(JSON.parse);const IN=/(^[*!]|[/()[\]{}\"])/;const A=r.filter(x=>x.source!==undefined&&!(x.pattern[0]==='.'||x.pattern[0]==='*')&&IN.test(x.pattern));console.log({classA:A.length,allRecordNone:A.every(x=>x.path==='none'),negatedInClassA:A.filter(x=>x.negated===true).length})"
+```
+
+---
+
 ## Related
 
 - [DECISIONS.md](../DECISIONS.md) §8 — why the scanner indexes UTF-16 code units.

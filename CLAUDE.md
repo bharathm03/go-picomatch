@@ -75,15 +75,37 @@ scanner layer 93.48% → **97.76%** and the headline 34.95% → **36.55%**, at
 **The option surface is no longer where the score is.** 49 pairs remain blocked
 and 11 of them are on `nocase`/`flags`, compile-layer keys `lib/parse.js` never
 reads, so no scanner branch can ever unblock them. The scanner layer's last 91
-fields are worth less than any one of the three untouched layers: `fastpath`
-(728 fields), `compile` (4,056) and `path` (2,028), all at zero.
+fields are worth less than any one of the three other layers.
 
-`compile` is the next one to build, and DECISIONS.md §17 scopes it: the emitted
+`internal/compile` is **built**, and DECISIONS.md §17 scopes it: the emitted
 regex **source string** is in scope, the compiled `*regexp.Regexp` is not. §1
 only ever ruled out the second, and reading "no regex" as one rule would decline
 string concatenation over a lookaround problem it does not have. Three rules
 cover all 2,028 compiled records — the `^(?:output)$` wrap, `EscapeRegExpPattern`
-on 5, the `$^` sentinel on 3 — and `flags` takes two values corpus-wide.
+on 5, the `$^` sentinel on 3 — and `flags` takes two values corpus-wide, `""` and
+`"i"`. It took the headline 36.55% → **67.16%** at **0 wrong**: `compile`
+2,196 of 4,056 and `path` 1,134 of 2,028.
+
+**Neither is at 100%, and the shortfall is a dependency rather than a gap.**
+`compileRe`'s input is `state.output`, so which state that is depends on which
+parser `makeRe` used — and two of the three do not exist here yet. What *is*
+decidable without them is the negative: when neither fast path's guard opens,
+nothing ran, so the path is `none` and the output is the scanner's.
+`compile.PathFullScanner` answers in that direction only, and it holds on 1,134
+of the 2,028 compiled records. The other 894 are blocked on `parse.fastpaths`,
+not on anything in `internal/compile`. Read transcription-traps #55 before
+touching that predicate: `!` closes the inline path without opening the top one,
+and the `^` in `/(^[*!]|…)/` binds to the `[*!]` alternative alone.
+
+So **`parse.fastpaths` is now the whole board.** Its own 728 fields are the
+smallest of the four layers, but building it unblocks the 894 records currently
+held back in `compile` and `path` as well — 728 + 894×3 = 3,410 fields, which
+is every remaining field outside the scanner's last 91.
+
+`internal/ecmaregexp` is the acceptance predicate `new RegExp` implies, and it
+now has two callers: `expandRange` (§15) and `toRegex` (§17). It moved out of
+`internal/parse` on the day the second one landed rather than being reached for
+across a package boundary.
 
 The decline rule still governs everything added from here. Never fall back to
 plausible output: a plausible-but-wrong token stream scores as a pass wherever the
@@ -190,8 +212,8 @@ emitter under default options** has been gated at 1,491/1,491 all along.
 `testdata/emit` adds the three layers that were unmeasured — non-default options,
 `parse.fastpaths()`, and `compileRe`'s `^(?:…)$` wrap and flags. It scores
 **fields, not cases**, across 2,038 (pattern, options) pairs, and reads
-`3976 of 10879 = 36.55%, 0 wrong` today: the scanner layer at 97.76% and the
-other three at zero. See `docs/emit-oracle.md`.
+`7306 of 10879 = 67.16%, 0 wrong` today: scanner 97.76%, compile 54.14%, path
+55.92%, fastpath 0%. See `docs/emit-oracle.md`.
 
 ### Three fixture sets, never merged
 
@@ -239,9 +261,15 @@ backtracking AST walker. DECISIONS.md §1.
 That rules out the compiled object, **not** the source string. §17 draws the
 line: `compileRe`'s `source` and `flags` are recorded values the port
 reproduces, exactly as `scannerOutput` is, and producing them needs no engine.
-No `MakeRe` either way — but the day the compile layer lands, a
-`MakeRe(pattern, opts) (string, error)` becomes an export rather than a second
-backend.
+`internal/compile` now does exactly that and imports no `regexp` — the one
+question it asks that an engine would normally answer, "would `new RegExp`
+throw", goes to `internal/ecmaregexp`, a transcribed grammar, because
+`regexp.Compile` would answer for the wrong language.
+
+Still no `MakeRe`, and the reason is now scope rather than capability: it would
+have to return a source for all three parser paths and only one of the three
+exists. When `parse.fastpaths` lands, `MakeRe(pattern, opts) (string, error)`
+becomes an export rather than a second backend.
 
 ## Invariants that break things quietly if ignored
 

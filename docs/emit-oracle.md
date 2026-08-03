@@ -122,25 +122,39 @@ Two axes are missing, not one, and they are worth **roughly the same**:
 
 | If you built… | Fields won | of 10,879 |
 |---|---:|---:|
-| nothing more than today | 3,976 | **36.55%** |
-| defaults only, all three layers | 5,414 | 49.77% |
+| nothing more than today | 7,306 | **67.16%** |
+| defaults only, all four layers | 5,414 | 49.77% |
 | all options, scanner only | 4,067 | 37.38% |
 
 **Neither axis alone clears half**, and they are within twelve points of each
-other, so the build order is not obvious from the code and this measurement is
-the thing that decides it.
+other, so the build order was not obvious from the code and this measurement is
+what decided it. Today's score has passed both ceilings, which is the point: it
+was reached by taking the option axis to 97.76% *and* the compile layer to
+54.14%, not by exhausting either.
 
 The first row is what `make emit` prints today:
 
 ```
-cases=2038 fields=10879 matched=3976 unbuilt=6903 wrong=0 emitter=36.55%
+cases=2038 fields=10879 matched=7306 unbuilt=3573 wrong=0 emitter=67.16%
   layer    scanner            3976 of 4067 matched (97.76%)
   layer    fastpath           0 of 728 matched (0.00%)
-  layer    compile            0 of 4056 matched (0.00%)
-  layer    path               0 of 2028 matched (0.00%)
-  options  defaultOptions     2038 of 5414 matched (37.64%)
-  options  nonDefaultOptions  1938 of 5465 matched (35.46%)
+  layer    compile            2196 of 4056 matched (54.14%)
+  layer    path               1134 of 2028 matched (55.92%)
+  options  defaultOptions     3796 of 5414 matched (70.11%)
+  options  nonDefaultOptions  3510 of 5465 matched (64.23%)
 ```
+
+The three blocked fields are blocked by ONE thing, and the report says so:
+
+```
+  blocked on flags (needs parse.fastpaths (picomatch.js:313))     894
+  blocked on path (needs parse.fastpaths (picomatch.js:313))      894
+  blocked on source (needs parse.fastpaths (picomatch.js:313))    894
+  blocked on fastpathOutput (no fastpaths pass (parse.js:1330))   728
+```
+
+That is 3,410 fields on one branch — every remaining field outside the scanner's
+last 91 — and it is why §7's ranking of option keys no longer decides anything.
 
 2,038 of those fields are the default-options `scannerOutput` and `negated` pair
 on 1,018 pairs plus the `scannerThrow` field on the 2 default-options pairs where
@@ -393,12 +407,27 @@ already live rather than opening a new one, and that is recorded in the
 carrying eight pairs between them. `nocase` and `flags` are compile-layer keys — their only reader in all of
 `lib/` is `picomatch.js:343` — so no branch of `internal/parse` can ever unblock
 them, and 11 of the 49 are theirs. The scanner layer's remaining 91 fields are
-worth less than any one of the three untouched layers, and the ranking that
-matters from here is `fastpath` (728 fields), `compile` (4,056) and `path`
-(2,028), not another option key. `compile` is both the largest and the cheapest —
-it needs no regex engine, only string concatenation over `output`, which the
-scanner already produces correctly on 97.76% of pairs. [DECISIONS.md](../DECISIONS.md)
-§17 scopes it; §7(c) below is its field census.
+worth less than any one of the other three layers, and the ranking that matters
+from here is no longer an option key at all.
+
+`compile` was the first of the three built, and it went exactly as the census
+predicted: no regex engine, only string concatenation over `output`, which the
+scanner already produces correctly on 97.76% of pairs.
+[DECISIONS.md](../DECISIONS.md) §17 scopes it; §7(c) below is its field census.
+It landed at **2,196 of 4,056**, and `path` at **1,134 of 2,028**, taking the
+headline 36.55% → **67.16%** at 0 wrong.
+
+**Neither reached its ceiling, and the residue is one dependency.** `compileRe`
+consumes `state.output`, so the port has to know which of the three parsers
+produced it. Only the negative is decidable without running them: when neither
+fast path's guard opens, nothing ran, so the path is `none`. That covers 1,134
+of the 2,028 compiled records — every one of which does record `none` — and
+leaves 894 apiece on `path`, `source` and `flags`. Add `fastpath`'s own 728 and
+**`parse.fastpaths` alone is worth 3,410 fields**, which is the entire remaining
+board bar the scanner's last 91. Nothing else is worth ranking against it.
+
+Read [transcription-traps.md](transcription-traps.md) #55 before writing that
+predicate, and #50 and #51 before writing the pass itself.
 
 **The record-level ranking in an earlier draft does not reproduce** (`windows`
 3240, `strictSlashes` 1840, `dot` 1668, `bash` 1132, `regex` 300, `posix` 296,
@@ -570,7 +599,7 @@ JS
 
 ---
 
-## 7. Four traps this fixture is shaped around
+## 7. Five traps this fixture is shaped around
 
 The first two have cost this repo once already; the last two were found by the
 adversarial pass over this fixture and are transcribed in
@@ -628,14 +657,19 @@ node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').
 ```
 
 prints `{ ok: 2020, fallback: 3, slashArtifact: 5 }`. `TestEmitParity` is fatal
-on any `Wrong`, so these are 8 false disagreements waiting for the day the
-compile layer's blocker is lifted.
+on any `Wrong`, so these were 8 false disagreements waiting for the day the
+compile layer's blocker was lifted.
 
-That day is now scoped: [DECISIONS.md](../DECISIONS.md) §17 puts the emitted
-`source` and `flags` **in** scope and leaves the compiled `*regexp.Regexp` out,
-which §1 alone did not distinguish. Those three rules — wrap,
-`EscapeRegExpPattern`, `$^` — are the whole layer, and the census above is the
-proof that nothing else is in it.
+That day has come and the census held: [DECISIONS.md](../DECISIONS.md) §17 puts
+the emitted `source` and `flags` **in** scope and leaves the compiled
+`*regexp.Regexp` out, which §1 alone did not distinguish. Those three rules —
+wrap, `EscapeRegExpPattern`, `$^` — are the whole layer. `internal/compile`
+implements exactly them and nothing else, and it scored **0 wrong** on its first
+run over all 1,098 records it can attempt, sentinels and slash artifacts
+included. The census above is why nothing else was needed.
+
+The 894 it cannot attempt are not a fourth rule. They are records whose `output`
+came from a parser the port does not have — see §7(e).
 
 ### (d) `output` was recorded and asserted by nothing
 
@@ -669,6 +703,41 @@ the recorded, unwrapped answer, and `testdata/tokens/summary.json` reports its
 total as 67.
 
 ---
+
+### (e) The path is a dependency, not a label — and it gates two other layers
+
+`compileRe`'s only input is `state.output`, and `makeRe` picks which state that
+is at picomatch.js:312-318. So `source` and `flags` are not computable from the
+scanner alone: on a record whose path is `top` or `inline`, wrapping the
+scanner's output would wrap the wrong string. On `inline` it would be wrong
+*structurally* — that output is already wrapped once by `utils.wrapOutput`
+inside `parse()`, so the recorded source nests as `^(?:^(?:foo)$)$`.
+
+Both guards are cheap syntactic predicates, but only one direction follows from
+a predicate. `parse.fastpaths` is called at `:313` and its result tested at
+`:316`, so an eligible pattern with a falsy output still falls through to the
+scanner — 382 corpus patterns are eligible for the top path and **25 take it**.
+Nothing short of running it distinguishes those. When neither guard opens,
+though, nothing ran and there is nothing to have returned:
+
+| | records | `path` recorded |
+|---|---:|---|
+| neither guard opens | 1,134 | `none`, all 1,134 |
+| a guard opens | 894 | needs `parse.fastpaths` |
+| | **2,028** | |
+
+That table is the whole reason `compile` reads 54.14% rather than 100%, and it
+is also why the `path` field is **recorded rather than derived**: a fixture that
+stored only the ingredients would be computing the answer it exists to check.
+
+Trap #55 is the reading that goes wrong here — `!` closes the inline path
+without opening the top one, so every negated pattern is in the first row.
+
+**Re-check** — prints `{ classA: 1134, allRecordNone: true, negatedInClassA: 59 }`:
+
+```bash
+node -e "const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').trim().split(String.fromCharCode(10)).map(JSON.parse);const IN=/(^[*!]|[/()[\]{}\"])/;const A=r.filter(x=>x.source!==undefined&&!(x.pattern[0]==='.'||x.pattern[0]==='*')&&IN.test(x.pattern));console.log({classA:A.length,allRecordNone:A.every(x=>x.path==='none'),negatedInClassA:A.filter(x=>x.negated===true).length})"
+```
 
 ## What this oracle deliberately does not record
 

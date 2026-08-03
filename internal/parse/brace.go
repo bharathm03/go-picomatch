@@ -1,14 +1,18 @@
 package parse
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/bharathm03/go-picomatch/internal/ecmaregexp"
+)
 
 // Braces: the "{a,b}" list and the "{a..b}" range.
 //
 // The main loop's three arms stay in scanner.go, in upstream's order. What is
 // here is expandRange (parse.js:22-38), which is the only helper the brace
 // branch has and the only place in parse() whose answer is decided by a
-// *regular expression engine* rather than by the grammar — see ecmaregexp.go
-// and DECISIONS.md §15.
+// *regular expression engine* rather than by the grammar — see
+// internal/ecmaregexp and DECISIONS.md §15.
 
 // expandRange is parse.js:22-38 under default options.
 //
@@ -40,7 +44,7 @@ func expandRange(args []units) units {
 	}
 	value = append(value, ']')
 
-	if ecmaRegExpValid(value) {
+	if ecmaregexp.Valid(value) {
 		return value
 	}
 

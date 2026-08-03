@@ -1041,6 +1041,24 @@ regex engine, only the ability to concatenate strings the scanner already
 produces correctly. Declining it on the strength of §1 would be declining
 string concatenation because of a lookaround problem it does not have.
 
+**Built, and it held.** `internal/compile` implements those three rules and
+nothing else. It scored 2,196 of 4,056 on its first run at **0 wrong** —
+sentinels and slash artifacts included — and took the emit headline 36.55% →
+67.16%. It imports no `regexp`; the one question it asks that an engine would
+normally answer, "would `new RegExp` throw", goes to `internal/ecmaregexp`,
+which is a transcribed grammar and was already there for `expandRange` (§15).
+
+The shortfall to 4,056 is not a fourth rule. `compileRe` consumes
+`state.output`, so the port has to know which of the three parsers produced it,
+and two of the three do not exist yet. Only the negative is decidable without
+them — when neither fast path's guard opens, nothing ran — so
+`compile.PathFullScanner` answers in that direction alone and covers 1,134 of
+the 2,028 compiled records. The other 894 are blocked on `parse.fastpaths`, not
+on anything in this entry's scope. `opts.debug` is the one branch of `toRegex`
+deliberately not written: it rethrows V8's `SyntaxError` verbatim, which is an
+engine's diagnostic text rather than a grammar's, and no corpus record sets the
+key.
+
 **Why the compiled object is still out of scope.** Unchanged, for §1's reason:
 RE2 has no lookaround and picomatch's output depends on it. Producing the text
 `^(?:(?!\.)…)$` is a `strings.Builder` call; asking Go's `regexp` to compile it
@@ -1066,7 +1084,10 @@ once the compile layer exists, `MakeRe(pattern string, opts *Options) (string,
 error)` returning the recorded ECMAScript text is an export, not a backend. §1's
 "reversible, at a price" paragraph priced that as a second full emitter because
 the emitter did not exist; this entry is the decision to build it, so the price
-is now the export alone. Still not done here — an addition, not a change.
+is now the export alone. Still not done, and now for a narrower reason than
+when this was written: `MakeRe` would have to answer for all three parser paths
+and only one of the three exists, so it waits on `parse.fastpaths` rather than
+on any decision here.
 
 **What is not in scope even as a string.** The compiled object's *behaviour*.
 Nothing in this entry lets the port answer `isMatch` by running a regex; the
@@ -1095,9 +1116,9 @@ grep -rl '"regexp"' --include='*.go' . | grep -vc '_test.go'        # 0
 ```
 
 Traps #52 and #53 in [transcription-traps.md](docs/transcription-traps.md) are
-the two places the obvious reading of `compileRe` is wrong, and both are fatal
-to `TestEmitParity` the day this layer's blocker is lifted, because that gate
-fails outright on any `Wrong`. Read them before writing it.
+the two places the obvious reading of `compileRe` is wrong; #55 is the one that
+decides which records the layer can reach at all. All three are fatal to
+`TestEmitParity`, which fails outright on any `Wrong`.
 
 ---
 

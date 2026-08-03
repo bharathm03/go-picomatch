@@ -1,13 +1,13 @@
-package parse
-
-import "unicode"
-
-// The ECMAScript RegExp acceptance predicate.
+// Package ecmaregexp answers one question: would `new RegExp(src)` return, or
+// throw?
 //
-// # Why this file exists
+// # Why the question is asked twice
 //
-// expandRange (parse.js:22-38) decides what a "{a..b}" compiles to by *building
-// a character class and handing it to the RegExp constructor*:
+// Upstream reaches for the RegExp constructor in two places that have nothing
+// else in common, and in both it uses the *outcome* rather than the regex.
+//
+// expandRange (parse.js:22-38) decides what a "{a..b}" compiles to by building
+// a character class and handing it to the constructor:
 //
 //	const value = `[${args.join('-')}]`;
 //	try { new RegExp(value); } catch (ex) {
@@ -15,13 +15,34 @@ import "unicode"
 //	}
 //	return value;
 //
-// So the brace token's output is chosen by what the host engine accepts as a
-// pattern. Go has no such engine to ask: regexp is RE2, which rejects sources
-// V8 accepts (backreferences, lookaround) and accepts sources V8 rejects, so
-// calling regexp.Compile here would answer a different question — see
-// DECISIONS.md §1 for the same mismatch one level up, and §15 for this one.
+// toRegex (picomatch.js:341-348) does the same thing to the finished source,
+// and on a throw returns /$^/ — a regex matching nothing — so a pattern that
+// cannot compile answers false to everything instead of failing. That is the 3
+// recorded "$^" sources in testdata/emit, and docs/transcription-traps.md #53.
 //
-// What this file is instead: the acceptance predicate itself, transcribed from
+// Both are decisions made by what the host engine accepts. Go has no such
+// engine to ask: regexp is RE2, which rejects sources V8 accepts
+// (backreferences, lookaround) and accepts sources V8 rejects, so calling
+// regexp.Compile here would answer a different question — see DECISIONS.md §1
+// for the same mismatch one level up, §15 for expandRange and §17 for toRegex.
+//
+// The package was inside internal/parse while expandRange was its only caller.
+// It moved out on the day the compile layer landed rather than being reached
+// for across a package boundary, because "which layer is wrong" is the whole
+// point of the four-oracle split and a shared helper that lives in one of them
+// blurs it.
+package ecmaregexp
+
+import "unicode"
+
+// units is a sequence of UTF-16 code units, and the reason is the one in
+// DECISIONS.md §8: the grammar below counts code units, so a surrogate pair is
+// two characters and "[<U+1F600>-<U+1F601>]" is a range *error*. It is an alias
+// rather than a defined type so internal/parse can pass its own `units` without
+// a conversion at the call site.
+type units = []uint16
+
+// What follows is the acceptance predicate itself, transcribed from
 // the ECMAScript pattern grammar (ES2024 22.2.1 plus the Annex B B.1.2
 // extensions) as V8 implements it for a non-unicode pattern with no flags. It
 // answers only "would the constructor throw"; it does not compile, match or
@@ -50,9 +71,14 @@ import "unicode"
 // The predicate is checked against V8 rather than argued for; the enumeration
 // and its count are in DECISIONS.md §15.
 
-// ecmaRegExpValid reports whether `new RegExp(src)` returns rather than throws,
-// for a pattern compiled with no flags.
-func ecmaRegExpValid(src units) bool {
+// Valid reports whether `new RegExp(src)` returns rather than throws, for a
+// pattern compiled with no flags.
+//
+// No flags is not a simplification here: `nocase` and `flags` take exactly two
+// values across the whole corpus, "" and "i", and neither can make the
+// constructor throw. A flags string that could — a repeated or unknown letter —
+// has no recorded case, so it is left unanswered rather than guessed at.
+func Valid(src units) bool {
 	v := &reValidator{src: src, named: scanHasGroupName(src), names: map[string]bool{}}
 	if !v.disjunction(0) {
 		return false

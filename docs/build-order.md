@@ -192,21 +192,49 @@ different tests (:719/:751 and :1077/:1257) whose defaults point opposite ways.
 Together: scanner layer 93.48% → **97.76%**, headline 34.95% → **36.55%**,
 **1,989 of 2,038** pairs attemptable, **0 wrong**.
 
-**What is next is not another option key.** 49 pairs remain blocked, spread over
-thirteen blockers topping out at 7, and 11 of them are `nocase`/`flags` —
+**What came next was not another option key.** 49 pairs remain blocked, spread
+over thirteen blockers topping out at 7, and 11 of them are `nocase`/`flags` —
 compile-layer keys whose only reader in all of `lib/` is `picomatch.js:343`, so
 no branch of `internal/parse` can ever reach them. The scanner layer's last 91
-fields are worth less than any one of the three layers still at zero:
+fields are worth less than any one of the three layers that were still at zero:
 `fastpath` (728 fields, `parse.fastpaths()`), `compile` (4,056, `compileRe` and
 `toRegex`) and `path` (2,028, the selector at picomatch.js:312-316).
 
-`compile` is the largest and, measured, the cheapest: it needs no regex engine.
+### Stage C — `compile` and the negative half of `path` (done)
+
+`compile` was the largest and, measured, the cheapest: it needs no regex engine.
 [DECISIONS.md](../DECISIONS.md) §17 is the entry that scopes it — the emitted
 *source string* is in scope where the compiled object is not, and §1 only ever
 ruled out the second. Three rules cover all 2,028 compiled records: the
 `^(?:output)$` wrap, ECMAScript's `EscapeRegExpPattern` on 5 of them
 ([transcription-traps.md](transcription-traps.md) #52), and the `$^` sentinel on
 3 (#53). `flags` takes two values in the whole corpus, `""` and `"i"`.
+
+`internal/compile` implements those three and nothing else. The acceptance
+predicate the `$^` rule needs already existed for `expandRange`, and moved to
+`internal/ecmaregexp` rather than being reached for across a package boundary.
+
+**Measured: headline 36.55% → 67.16%, 0 wrong.** `compile` 2,196 of 4,056 and
+`path` 1,134 of 2,028.
+
+Neither is complete, and the reason is a dependency rather than a missing rule.
+`compileRe` consumes `state.output`, so the port must know which of the three
+parsers produced it; only the *negative* is decidable without running them.
+`compile.PathFullScanner` answers that direction alone — neither guard opened,
+so nothing ran, so the path is `none` — and it holds on 1,134 records, every one
+of which records `none`.
+
+### Stage D — `parse.fastpaths`, which is now the entire remaining board
+
+The 894 records `PathFullScanner` declines are blocked on this one branch, on
+`path`, `source` and `flags` alike. With `fastpath`'s own 728 fields that is
+**3,410**, every field left outside the scanner's last 91. Nothing else is worth
+ranking against it.
+
+Read [transcription-traps.md](transcription-traps.md) #55 first — `!` closes the
+inline path without opening the top one, and the `^` in `/(^[*!]|…)/` binds to
+the `[*!]` alternative alone — then #50 and #51, which are the two places
+`fastpaths` and `parse()` read the *same* option differently.
 
 Two things `windows` established that carried forward. The Windows constants
 table is **four** leaves and twelve derivations, not two, and the leaf that
