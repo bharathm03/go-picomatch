@@ -289,9 +289,17 @@ func decodeRaw(raw json.RawMessage, dst **RawValue) error {
 
 // IsDefault reports whether the record carries no emit-relevant option at all.
 //
-// It is what decides attemptability in the gate: internal/parse.Parse takes one
-// argument and internal/parse has no Options type, so a record with any option
-// set has no callable entry point and must score unbuilt rather than wrong.
+// It decides the gate's option *stratum*, not attemptability. The two used to be
+// the same question and stopped being one the moment a key was threaded through:
+// internal/parse.Parse now takes an Options, so a `{"windows":true}` record has a
+// callable entry point and is scored, while still counting as non-default.
+//
+// Attemptability is emitParseOptions in emit_test.go, which asks whether
+// internal/parse.Options can express the keys this record carries. Reusing
+// IsDefault for it would freeze the gate at the day it was written; reusing
+// attemptability for the stratum would migrate each newly threaded key into the
+// defaultOptions row and inflate the number that exists to say how much of the
+// score `make tokens` had already proved.
 func (o *Options) IsDefault() bool {
 	for _, k := range o.optionKeys() {
 		if k.isSet() {

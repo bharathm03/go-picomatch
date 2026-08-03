@@ -46,12 +46,12 @@ func TestLengthErrorCountsCodeUnits(t *testing.T) {
 	// 32768 astral characters: 65536 code units, exactly at the cap, but only
 	// 32768 runes. A rune-counting guard would accept twice the input.
 	atCap := strings.Repeat(smile, maxLength/2)
-	if _, err := newScanner(atCap); err != nil {
+	if _, err := newScanner(atCap, Options{}); err != nil {
 		t.Fatalf("input of exactly %d code units was rejected: %v", maxLength, err)
 	}
 
 	overByOne := atCap + "a"
-	_, err := newScanner(overByOne)
+	_, err := newScanner(overByOne, Options{})
 	var lengthErr *LengthError
 	if !errors.As(err, &lengthErr) {
 		t.Fatalf("input of %d code units: got %v, want a LengthError", maxLength+1, err)

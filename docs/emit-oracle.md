@@ -122,7 +122,7 @@ Two axes are missing, not one, and they are worth **roughly the same**:
 
 | If you built… | Fields won | of 10,879 |
 |---|---:|---:|
-| nothing more than today | 2,038 | **18.73%** |
+| nothing more than today | 2,686 | **24.69%** |
 | defaults only, all three layers | 5,414 | 49.77% |
 | all options, scanner only | 4,067 | 37.38% |
 
@@ -133,26 +133,33 @@ the thing that decides it.
 The first row is what `make emit` prints today:
 
 ```
-cases=2038 fields=10879 matched=2038 unbuilt=8841 wrong=0 emitter=18.73%
-  layer    scanner            2038 of 4067 matched (50.11%)
+cases=2038 fields=10879 matched=2686 unbuilt=8193 wrong=0 emitter=24.69%
+  layer    scanner            2686 of 4067 matched (66.04%)
   layer    fastpath           0 of 728 matched (0.00%)
   layer    compile            0 of 4056 matched (0.00%)
   layer    path               0 of 2028 matched (0.00%)
   options  defaultOptions     2038 of 5414 matched (37.64%)
-  options  nonDefaultOptions  0 of 5465 matched (0.00%)
+  options  nonDefaultOptions  648 of 5465 matched (11.86%)
 ```
 
-Those 2,038 fields are the default-options `scannerOutput` and `negated` pair on
-1,018 pairs plus the `scannerThrow` field on the 2 default-options pairs where
+2,038 of those fields are the default-options `scannerOutput` and `negated` pair
+on 1,018 pairs plus the `scannerThrow` field on the 2 default-options pairs where
 the scanner throws — and the `defaultOptions` stratum's 5,414 *is* the
 defaults-only ceiling in the table above, printed by the gate itself. Every point
-of the 18.73% is **already proven by `make tokens`**, which is why a floor set
-today buys nothing: leave `PICOMATCH_EMIT_MIN` unset until `windows` is threaded,
-then set it.
+of that 18.73% was **already proven by `make tokens`**.
+
+The other 648 are `windows`, threaded in §4 below: 288 `scannerOutput`, 324
+`negated` and 36 `scannerThrow` over the 324 pairs whose only option is that key.
+That is the first score on this gate `make tokens` had not already proved, and
+the first number a floor can usefully sit under — `PICOMATCH_EMIT_MIN` is worth
+setting now, which it was not before.
 
 Everything else is unbuilt for a stated reason, and the gate must record it as
-`unbuilt` rather than `wrong`: `internal/parse.Parse` takes one argument and has
-no `Options` type, so a non-default case has no callable entry point at all.
+`unbuilt` rather than `wrong`: a record carrying an option `internal/parse.Options`
+cannot express has no callable entry point at all. The gate's own list of what it
+can express is `emitAnsweredOptions` in `emit_test.go`, and a key must join it on
+the same day it earns a field there — leaving a threaded key out would park its
+records in the column nobody reads twice.
 
 **A figure that does not reproduce.** An earlier draft put the defaults-only
 ceiling at `12,906 / 19,162 = 67.35%` of *records*. Measured, a defaults-only
@@ -213,13 +220,31 @@ The head of the list is where the work is. The top four keys — `windows`,
 pairs, meaning those pairs use no other key at all; 967 of the 1,018 carry at
 least one of them.
 
-**`windows` first, by a wide margin.** It alone is 570 of the 1,018 non-default
-pairs, **56%**, and it is the *only* key on 324 of them. It is also a
-*constants-table swap* rather than a branch:
-`parse.js:377` and `:1351` pass it positionally to `constants.globChars`, which
-tests `win32 === true`. The port already spells the POSIX set as constants and
-the Windows set is two leaves away (`SLASH_LITERAL`, `QMARK`). Cheapest first
-move available.
+**`windows` first, by a wide margin — and it is done.** It alone was 570 of the
+1,018 non-default pairs, **56%**, and the *only* key on 324 of them. It is a
+*constants-table swap* rather than a branch: `parse.js:377` and `:1351` pass it
+positionally to `constants.globChars`, which tests `win32 === true`.
+
+`internal/parse.Options.Windows` and `internal/parse/chars.go` are that swap. The
+324 windows-only pairs are now attempted rather than blocked, and the result is
+the reason to trust the table: **648 fields, 0 wrong**. The scanner layer went
+50.11% → **66.04%** and the headline 18.73% → **24.69%**.
+
+Two corrections to the prose above it, both found in the writing:
+
+- **Not two leaves — four.** `SLASH_LITERAL`, `QMARK`, `QMARK_NO_DOT` and `SEP`.
+  `QMARK_NO_DOT` is the one that looks derivable and is not: substituting the
+  Windows `SLASH_LITERAL` into the POSIX expression nests a character class
+  inside a character class, and JavaScript compiles the result rather than
+  rejecting it. [transcription-traps.md](transcription-traps.md) #54.
+- **The threaded key does not move to the `defaultOptions` stratum.** A
+  `{"windows":true}` record is attempted and still counted as non-default, which
+  is why that row reads 11.86% rather than the default row growing. The stratum
+  answers "how much of this score is work `make tokens` had already proved", and
+  folding newly threaded keys into it would inflate the one number kept honest.
+
+`strictSlashes` (245) is next by pairs, then `bash` (235) and `dot` (207). Unlike
+`windows`, all three are branches.
 
 **The record-level ranking in an earlier draft does not reproduce** (`windows`
 3240, `strictSlashes` 1840, `dot` 1668, `bash` 1132, `regex` 300, `posix` 296,

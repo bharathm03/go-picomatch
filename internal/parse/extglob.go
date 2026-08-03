@@ -58,28 +58,6 @@ type extglob struct {
 	tokensIndex int
 }
 
-// extglobCharsFor is constants.extglobChars(PLATFORM_CHARS), POSIX set.
-//
-// The negate close embeds `chars.STAR` — the platform constant, not parse()'s
-// rebound `star` variable, which opts.bash and opts.capture also feed. The two
-// coincide under default options and the distinction is upstream's, so it is
-// spelled with the constant.
-func extglobCharsFor(c uint16) (typ, open, closing string, ok bool) {
-	switch c {
-	case '!':
-		return "negate", `(?:(?!(?:`, `))` + star + `)`, true
-	case '?':
-		return "qmark", `(?:`, `)?`, true
-	case '+':
-		return "plus", `(?:`, `)+`, true
-	case '*':
-		return "star", `(?:`, `)*`, true
-	case '@':
-		return "at", `(?:`, `)`, true
-	}
-	return "", "", "", false
-}
-
 // --- the ReDoS analysis (parse.js:48-347) ----------------------------------
 
 // splitTopLevel is parse.js:48-98: split on "|" at nesting depth zero, with
@@ -489,7 +467,7 @@ func dedupeUnits(in []units) []units {
 // JavaScript truthiness at the moment the object literal is built — an empty
 // output, not merely an absent one.
 func (s *scanner) extglobOpen(typ string, value units) {
-	_, open, closing, _ := extglobCharsFor(value[0])
+	_, open, closing, _ := s.chars.extglobChars(value[0])
 
 	e := &extglob{
 		typ:         typ,
@@ -510,7 +488,7 @@ func (s *scanner) extglobOpen(typ string, value units) {
 
 	first := units{}
 	if len(s.output) == 0 {
-		first = encode(oneChar)
+		first = encode(s.chars.oneChar)
 	}
 	s.push(&token{typ: typ, value: value, output: &first})
 	if s.err != nil {
@@ -542,7 +520,7 @@ func (s *scanner) extglobClose(e *extglob, value units) error {
 			// parse.js:546. token.output is the snapshot, tested for JavaScript
 			// truthiness — an empty snapshot takes the ONE_CHAR.
 			if len(e.output) == 0 {
-				openOutput = append(openOutput, encode(oneChar)...)
+				openOutput = append(openOutput, encode(s.chars.oneChar)...)
 			}
 			openOutput = append(openOutput, analysis.safeOutput...) // opts.capture wraps this in a group
 		} else {
@@ -578,12 +556,12 @@ func (s *scanner) extglobClose(e *extglob, value units) error {
 	if e.typ == "negate" {
 		// parse.js:572-580. extglobStar is compared against `star` by value, so
 		// the test at :578 is "did the body force a globstar body".
-		extglobStar := star
+		extglobStar := s.star
 		if len(e.inner) > 1 && e.inner.contains('/') {
-			extglobStar = globstarBody
+			extglobStar = s.globstarBody
 		}
 
-		if extglobStar != star || s.eos() || isAllCloseParens(s.remaining()) {
+		if extglobStar != s.star || s.eos() || isAllCloseParens(s.remaining()) {
 			output = encode(`)$))` + extglobStar)
 		}
 
@@ -591,7 +569,7 @@ func (s *scanner) extglobClose(e *extglob, value units) error {
 		// paren is parsed on its own and spliced into the close.
 		if e.inner.contains('*') {
 			if rest := s.remaining(); len(rest) > 0 && isDotSuffix(rest) {
-				inner, err := parseSuffix(rest)
+				inner, err := parseSuffix(rest, s.opts)
 				if err != nil {
 					var u *UnsupportedError
 					if errors.As(err, &u) {
@@ -657,8 +635,8 @@ func isDotSuffix(rest units) bool {
 // is keyed on "***", "**/**" and "**/**/**", and isDotSuffix has already
 // established that rest begins with "."; and the maxLength guard has already
 // passed for the whole input, of which rest is a suffix.
-func parseSuffix(rest units) (units, error) {
-	sub := newScannerUnits(rest.clone())
+func parseSuffix(rest units, opts Options) (units, error) {
+	sub := newScannerUnits(rest.clone(), opts)
 	if err := sub.run(); err != nil {
 		return nil, err
 	}

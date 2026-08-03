@@ -228,7 +228,7 @@ var unbuiltPatterns []string
 
 func TestParseReturnsForEveryBuiltBranch(t *testing.T) {
 	for _, p := range builtPatterns {
-		st, err := Parse(p)
+		st, err := Parse(p, Options{})
 		if err != nil {
 			t.Errorf("Parse(%q): unexpected error %v", p, err)
 			continue
@@ -249,12 +249,12 @@ func TestParseReturnsForEveryBuiltBranch(t *testing.T) {
 // pattern parsing differently in a different order.
 func TestParseIsDeterministic(t *testing.T) {
 	for _, p := range builtPatterns {
-		first, err := Parse(p)
+		first, err := Parse(p, Options{})
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", p, err)
 		}
 		for i := 0; i < 3; i++ {
-			again, err := Parse(p)
+			again, err := Parse(p, Options{})
 			if err != nil {
 				t.Fatalf("Parse(%q) run %d: %v", p, i, err)
 			}
@@ -320,7 +320,7 @@ func TestTokensDoNotShareMemory(t *testing.T) {
 		"+(*|a)", "+(*(a)|*(b))", "x+(a|aa).b", "!(*).ts", "!(a.b|c)d.e",
 		strings.Repeat("+(a|b)", 32), "a." + strings.Repeat("!(x)", 32),
 	} {
-		s, err := newScanner(pattern)
+		s, err := newScanner(pattern, Options{})
 		if err != nil {
 			t.Fatalf("newScanner(%q): %v", pattern, err)
 		}
@@ -403,7 +403,7 @@ func TestParseTerminates(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_, _ = Parse(p)
+			_, _ = Parse(p, Options{})
 		}()
 		select {
 		case <-done:
@@ -418,11 +418,11 @@ func TestParseTerminates(t *testing.T) {
 // nothing at all for the input.
 func TestNonTerminatingInputIsReported(t *testing.T) {
 	// Three trailing backslashes still terminate upstream; four do not.
-	if _, err := Parse(`a\\\`); err != nil {
+	if _, err := Parse(`a\\\`, Options{}); err != nil {
 		t.Fatalf(`Parse("a\\\"): %v — three backslashes terminate upstream`, err)
 	}
 
-	st, err := Parse(`a\\\\`)
+	st, err := Parse(`a\\\\`, Options{})
 	var nonTerm *NonTerminatingError
 	if !errors.As(err, &nonTerm) {
 		t.Fatalf(`Parse("a\\\\"): got %v, want a NonTerminatingError`, err)
@@ -455,7 +455,7 @@ func TestPosixClassAtEndOfInputIsReported(t *testing.T) {
 		"[[:alnum:][:alnum:",
 	}
 	for _, p := range hangs {
-		st, err := Parse(p)
+		st, err := Parse(p, Options{})
 		var nonTerm *NonTerminatingError
 		if !errors.As(err, &nonTerm) {
 			t.Errorf("Parse(%q): got %v, want a NonTerminatingError", p, err)
@@ -481,7 +481,7 @@ func TestPosixClassAtEndOfInputIsReported(t *testing.T) {
 		"[[:alpha:]]",  // the whole construct
 	}
 	for _, p := range returns {
-		if _, err := Parse(p); err != nil {
+		if _, err := Parse(p, Options{}); err != nil {
 			var nonTerm *NonTerminatingError
 			if errors.As(err, &nonTerm) {
 				t.Errorf("Parse(%q): reported non-terminating, but upstream returns", p)
@@ -495,7 +495,7 @@ func TestPosixClassAtEndOfInputIsReported(t *testing.T) {
 // names itself, and it comes with the tokens the scanner did manage.
 func TestUnbuiltConstructsDeclineWithAPartialState(t *testing.T) {
 	for _, p := range unbuiltPatterns {
-		st, err := Parse(p)
+		st, err := Parse(p, Options{})
 		var unsupported *UnsupportedError
 		if !errors.As(err, &unsupported) {
 			// The branch landed. That is progress, not a failure.
@@ -552,7 +552,7 @@ func TestBacktrackRebuildsOutputFromTokens(t *testing.T) {
 
 	rebuilt, unrebuilt := 0, 0
 	for _, p := range builtPatterns {
-		st, err := Parse(p)
+		st, err := Parse(p, Options{})
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", p, err)
 		}
@@ -591,7 +591,7 @@ func TestGlobstarIsRewrittenBackToAStar(t *testing.T) {
 	// Each of these puts a token that is not a slash, paren, brace or extglob
 	// immediately after a "**": text, a dot, a "}" and a comma.
 	for _, p := range []string{"**a", "**c", "**.b", "**}", "**,", "a/**b"} {
-		st, err := Parse(p)
+		st, err := Parse(p, Options{})
 		if err != nil {
 			t.Errorf("Parse(%q): %v", p, err)
 			continue
@@ -607,7 +607,7 @@ func TestGlobstarIsRewrittenBackToAStar(t *testing.T) {
 		if !strings.Contains(st.Consumed, "**") {
 			t.Errorf("Parse(%q): consumed %q, but both stars were read; the value shrinks and the consumed text does not", p, st.Consumed)
 		}
-		if strings.Contains(st.Output, globstarBody) {
+		if strings.Contains(st.Output, newScannerUnits(nil, Options{}).globstarBody) {
 			t.Errorf("Parse(%q): output %q still contains the globstar body; parse.js:499 truncates it away before appending the star", p, st.Output)
 		}
 	}
@@ -616,7 +616,7 @@ func TestGlobstarIsRewrittenBackToAStar(t *testing.T) {
 	// globstar leaves it alone. Without this the test above would also pass
 	// against a push() that rewrote unconditionally.
 	for _, p := range []string{"**/a", "a/**/b", "**/"} {
-		st, err := Parse(p)
+		st, err := Parse(p, Options{})
 		if err != nil {
 			t.Errorf("Parse(%q): %v", p, err)
 			continue
@@ -844,7 +844,7 @@ func TestExtglobInnerIsNotTheBody(t *testing.T) {
 		{"!(*)", "*", "*", true},
 		{"!(a/b)", "/", "/", true},
 	} {
-		s, err := newScanner(tc.pattern)
+		s, err := newScanner(tc.pattern, Options{})
 		if err != nil {
 			t.Fatalf("newScanner(%q): %v", tc.pattern, err)
 		}
@@ -909,7 +909,7 @@ func TestUnmatchedCloseParenTakesTheCounterNegative(t *testing.T) {
 		{"a)b)c", -2},
 		{"(a))", -1},
 	} {
-		s, err := newScanner(tc.pattern)
+		s, err := newScanner(tc.pattern, Options{})
 		if err != nil {
 			t.Fatalf("newScanner(%q): %v", tc.pattern, err)
 		}
@@ -929,7 +929,7 @@ func TestUnmatchedCloseParenTakesTheCounterNegative(t *testing.T) {
 func TestOversizeInputIsRejectedBeforeConversion(t *testing.T) {
 	over := strings.Repeat("a", maxLength+1)
 	allocs := testing.AllocsPerRun(10, func() {
-		if _, err := newScanner(over); err == nil {
+		if _, err := newScanner(over, Options{}); err == nil {
 			t.Fatal("oversize input was accepted")
 		}
 	})

@@ -138,6 +138,39 @@ const (
 	emitNonDefaultOptions = "nonDefaultOptions"
 )
 
+// emitAnsweredOptions are the upstream option keys internal/parse.Options can
+// express, and therefore the keys a record may carry and still be attempted.
+//
+// It is not the list of keys internal/parse *mentions*: roughly forty `opts.`
+// sites are transcribed but marked rather than written, and a record carrying one
+// of those would parse cleanly under the wrong configuration and score a pass
+// wherever the two happen to agree. A key joins this map on the day its branch
+// lands, which is the same day it earns a field on internal/parse.Options — the
+// two lists are kept in step by emitParseOptions failing to compile otherwise.
+var emitAnsweredOptions = map[string]bool{
+	"windows": true, // constants.globChars, parse.js:377
+}
+
+// emitParseOptions converts a record's recorded options into the ones
+// internal/parse takes, or names the first key it cannot express.
+//
+// Returning the key rather than a bool is what lets the report say `opts.dot`
+// instead of "non-default": the blocker string is the build order, and "some
+// option" would rank nothing. SetKeys is sorted, so the key blamed for a record
+// carrying several is stable between runs.
+func emitParseOptions(o *emitcase.Options) (parse.Options, string) {
+	for _, k := range o.SetKeys() {
+		if !emitAnsweredOptions[k] {
+			return parse.Options{}, k
+		}
+	}
+	// Read through the pointer: `{"windows":false}` is a set key with the default
+	// value, and treating its presence as truth would parse it for the wrong
+	// platform. It is set-ness that decides attemptability and the value that
+	// decides the table.
+	return parse.Options{Windows: o.Windows != nil && *o.Windows}, ""
+}
+
 func TestEmitParity(t *testing.T) {
 	cases, err := emitcase.Load(emitPath)
 	if err != nil {
@@ -184,14 +217,22 @@ func replayEmitSet(cases []emitcase.Case, path string) emitReport {
 		c := &cases[i]
 
 		// The scanner is parsed once per case rather than once per field, and
-		// only when the options are default: internal/parse.Parse takes one
-		// argument, so there is nothing to pass the rest to.
+		// only when internal/parse can express the record's options.
+		//
+		// The stratum and the attempt are two different questions and are asked
+		// separately: a `{"windows":true}` record is attempted, and still counts
+		// under nonDefaultOptions, because that stratum exists to say how much of
+		// the score is work `make tokens` had already proved. Folding the two
+		// would move each newly threaded key's records into the default column and
+		// quietly inflate the one number that is supposed to stay honest.
 		var st *parse.State
 		var perr error
 		optStratum := emitNonDefaultOptions
 		if c.Options.IsDefault() {
 			optStratum = emitDefaultOptions
-			st, perr = parse.Parse(c.Pattern)
+		}
+		if popts, unexpressible := emitParseOptions(&c.Options); unexpressible == "" {
+			st, perr = parse.Parse(c.Pattern, popts)
 		}
 
 		for _, field := range c.Layers() {
@@ -260,14 +301,18 @@ func emitStratumFor(m map[string]*emitStratum, key string) *emitStratum {
 func compareEmitField(c *emitcase.Case, field string, st *parse.State, perr error) (detail, blocker string) {
 	switch field {
 	case emitcase.FieldScannerOutput, emitcase.FieldNegated, emitcase.FieldScannerThrow:
-		// Attemptable only under default options. internal/parse.Parse takes one
-		// argument and internal/parse has no Options type at all, so a record
-		// carrying any option has no callable entry point and must be unbuilt —
-		// never wrong. Without this the gate would manufacture a thousand false
-		// disagreements on its first run and the Wrong column would stop meaning
-		// anything.
-		if !c.Options.IsDefault() {
-			return "", "opts." + c.Options.SetKeys()[0]
+		// Attemptable only under options internal/parse can express. A record
+		// carrying a key the port cannot pass has no callable entry point and must
+		// be unbuilt — never wrong. Without this the gate would manufacture a
+		// thousand false disagreements on its first run and the Wrong column would
+		// stop meaning anything.
+		//
+		// The converse is the whole point of threading a key through: once
+		// `windows` is expressible, a windows record that disagrees is Wrong, and
+		// the gate fails on it. Leaving a threaded key out of emitAnsweredOptions
+		// would keep its records in the column nobody reads twice.
+		if _, unexpressible := emitParseOptions(&c.Options); unexpressible != "" {
+			return "", "opts." + unexpressible
 		}
 		return compareScannerField(c, field, st, perr)
 	}
@@ -433,7 +478,7 @@ func logEmitBlockers(t *testing.T, rep *emitReport) {
 func TestCompareEmitDetectsDifferences(t *testing.T) {
 	const pattern = "a/b"
 
-	st, err := parse.Parse(pattern)
+	st, err := parse.Parse(pattern, parse.Options{})
 	if err != nil {
 		t.Fatalf("Parse(%q): %v", pattern, err)
 	}
@@ -496,7 +541,7 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 	// unlike a choice of unbuilt construct this does not expire as the port grows.
 	t.Run("a recorded throw is compared by name and message", func(t *testing.T) {
 		overlong := strings.Repeat("a", 64*1024+1)
-		_, perr := parse.Parse(overlong)
+		_, perr := parse.Parse(overlong, parse.Options{})
 		name, message, ok := emitThrowOf(perr)
 		if !ok {
 			t.Fatalf("the port's length error cannot be stated in upstream's terms: %v", perr)
@@ -554,6 +599,9 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 		c := base()
 		c.Options = opts
 		detail, blocker := compareEmitField(&c, emitcase.FieldScannerOutput, st, nil)
+		// Both keys are set and only one is expressible, so the blocker names the
+		// one that is not — sorted order would otherwise report opts.windows and
+		// claim a threaded key is what is missing.
 		if blocker != "opts.dot" {
 			t.Fatalf("blocker = %q, want %q (detail %q)", blocker, "opts.dot", detail)
 		}
@@ -567,14 +615,22 @@ func TestCompareEmitDetectsDifferences(t *testing.T) {
 func TestReplayEmitSetTallies(t *testing.T) {
 	const pattern = "a/b"
 
-	st, err := parse.Parse(pattern)
+	st, err := parse.Parse(pattern, parse.Options{})
 	if err != nil {
 		t.Fatalf("Parse(%q): %v", pattern, err)
 	}
 
-	var windows emitcase.Options
-	if err := json.Unmarshal([]byte(`{"windows":true}`), &windows); err != nil {
+	// opts.dot, not opts.windows: windows is threaded through now, so a windows
+	// record is attempted rather than blocked, and using it here would test the
+	// opposite of what this case is for. Whatever key stands in has to be one
+	// emitAnsweredOptions does not carry — TestEmitAnsweredOptionsAreThreaded
+	// fails if this one ever becomes expressible and nobody updates it.
+	var blocking emitcase.Options
+	if err := json.Unmarshal([]byte(`{"dot":true}`), &blocking); err != nil {
 		t.Fatalf("decode options: %v", err)
+	}
+	if _, unexpressible := emitParseOptions(&blocking); unexpressible != "dot" {
+		t.Fatalf("opts.dot is expressible now (%q); this case needs a key the port still cannot pass", unexpressible)
 	}
 
 	inline := emitcase.PathInline
@@ -591,7 +647,7 @@ func TestReplayEmitSetTallies(t *testing.T) {
 	wrong := right
 	wrong.ScannerOutput = ptr(st.Output + "x")
 	blocked := right
-	blocked.Options = windows
+	blocked.Options = blocking
 
 	rep := replayEmitSet([]emitcase.Case{right, wrong, blocked}, "synthetic")
 
@@ -620,9 +676,9 @@ func TestReplayEmitSetTallies(t *testing.T) {
 	}
 
 	// The blocker label is the build order, so its form is part of the contract.
-	if got := rep.UnbuiltByBlocker["scannerOutput (opts.windows)"]; got != 1 {
+	if got := rep.UnbuiltByBlocker["scannerOutput (opts.dot)"]; got != 1 {
 		t.Errorf("unbuiltByBlocker[%q] = %d, want 1 (got %v)",
-			"scannerOutput (opts.windows)", got, rep.UnbuiltByBlocker)
+			"scannerOutput (opts.dot)", got, rep.UnbuiltByBlocker)
 	}
 
 	if s := rep.ByOptions[emitDefaultOptions]; s == nil || s.Fields != 10 || s.Matched != 3 {

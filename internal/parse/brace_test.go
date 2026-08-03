@@ -219,7 +219,7 @@ func TestSortJSIsTheDefaultComparator(t *testing.T) {
 
 func mustParse(t *testing.T, p string) *State {
 	t.Helper()
-	st, err := Parse(p)
+	st, err := Parse(p, Options{})
 	if err != nil {
 		t.Fatalf("Parse(%q): %v", p, err)
 	}

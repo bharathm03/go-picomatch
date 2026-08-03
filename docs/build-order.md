@@ -166,15 +166,24 @@ against both `=== false` and `=== true` so unset is a third state
 ([DECISIONS.md](../DECISIONS.md) §2 already has it as a `*bool`);
 `maxExtglobRecursion` takes a number or `false`; and `expandRange` is a
 caller-supplied **function** with no `Options` field at all, which §15 records as
-a gap rather than a decision. `Options.Windows` also has to reach
-`constants.globChars` — the port currently spells the POSIX set as constants and
-the Windows set is two leaves away
-(`SLASH_LITERAL` and `QMARK`), by design.
+a gap rather than a decision. `Options.Windows` is the exception: it is **written**, and it is the shape the
+rest are not. It reaches `constants.globChars` and nothing else, so it landed as
+`internal/parse/chars.go` — a table selected per parse — without touching a
+branch in the scanner.
 
-Which of those keys to write first is measured, not a matter of taste:
-`windows` 570 pairs, `strictSlashes` 245, `bash` 235, `dot` 207, then a tail
-ending at 1. The four together fully unblock 882 of the 1,018 non-default pairs.
-Full ranking and derivation in [emit-oracle.md](emit-oracle.md) §4.
+Which of the rest to write first is measured, not a matter of taste:
+`strictSlashes` 245 pairs, `bash` 235, `dot` 207, then a tail ending at 1
+(`windows` led at 570 before it was threaded). The four together fully unblock
+882 of the 1,018 non-default pairs. Full ranking and derivation in
+[emit-oracle.md](emit-oracle.md) §4.
+
+Two things `windows` established that the next three will not inherit. The
+Windows constants table is **four** leaves and twelve derivations, not two, and
+the leaf that looks derivable and is not costs a nested character class that
+JavaScript compiles rather than rejects — [transcription-traps.md](transcription-traps.md)
+#54. And a key becomes attemptable in the emitter gate only when it is added to
+`emitAnsweredOptions` in `emit_test.go`; forgetting that leaves its records
+scored `unbuilt`, which is the column that does not fail the run.
 
 **The emitter and the matcher.** `make tokens` is at 100% and `make conformance`
 is at 3.13%, which is exactly the gap the oracle table in `CLAUDE.md` predicts:

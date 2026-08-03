@@ -200,6 +200,10 @@ type State struct {
 
 // Parse scans pattern into a token stream, running the full scanner.
 //
+// opts carries only the keys this package answers — see [Options] for why that
+// is narrower than the keys upstream reads. The zero value is upstream's
+// defaults.
+//
 // It corresponds to upstream's parse(pattern, {fastpaths: false}) — the form
 // picomatch.parse itself always calls (lib/picomatch.js:212). The fast paths are
 // a separate normalisation pass and do not belong here; see
@@ -228,8 +232,8 @@ type State struct {
 // [LengthError] and [NonTerminatingError] return a nil state. Neither has a
 // meaningful prefix: the first is refused before scanning starts, and the second
 // is a point at which upstream stops producing anything.
-func Parse(pattern string) (*State, error) {
-	s, err := newScanner(pattern)
+func Parse(pattern string, opts Options) (*State, error) {
+	s, err := newScanner(pattern, opts)
 	if err != nil {
 		return nil, err
 	}

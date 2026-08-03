@@ -27,22 +27,34 @@ prologue, stars and globstars, extglobs, brackets, braces and `?`), so no input
 is declined any more and `UnsupportedError` no longer names a construct.
 
 What remains in `internal/parse` is the **option surface**, not another branch.
-Roughly forty sites are transcribed but marked rather than written, each reachable
-only once `Options` are threaded in; `grep -n "opts\." internal/parse/*.go` is the
+`internal/parse.Parse` now takes an `Options`, and it carries exactly one key:
+`Windows`. That is deliberate and is the rule for the rest — a key earns a field
+on the day its branch is written, never before, because an accepted-and-ignored
+option returns a plausible token stream for the wrong configuration and scores a
+pass wherever the two happen to agree. Roughly forty `opts.` sites are still
+transcribed but marked; `grep -n "opts\." internal/parse/*.go` is the
 authoritative list. Three need an answer before code: `literalBrackets` (tested
 `=== false` at parse.js:856 and `=== true` at :865, so unset is a third state),
 `maxExtglobRecursion` (a number or `false`), and `expandRange` (parse.js:23 — a
 caller-supplied *function*, with no `Options` field yet; DECISIONS.md §15).
 
-**That surface is now sequenced, not a pile of cleanup.** `testdata/emit` ranks
-the keys by the (pattern, options) pairs each unblocks, and it is very lopsided:
+**That surface is sequenced, not a pile of cleanup.** `testdata/emit` ranks the
+keys by the (pattern, options) pairs each unblocks, and it is very lopsided:
 `windows` 570, `strictSlashes` 245, `bash` 235, `dot` 207, then a tail ending at
 1 pair. Those four keys alone fully unblock **882 of the 1,018** non-default
-pairs, and `windows` — 56% of them, and the *only* key on 324 — is a
+pairs.
+
+`windows` — 56% of them, and the *only* key on 324 — is **done**: it is a
 constants-table swap (`constants.globChars(opts.windows)`) rather than a branch,
-so it is the cheapest first move by a wide margin. `docs/emit-oracle.md` holds
-the ranking and the ceilings; re-derive from `testdata/emit/summary.json` rather
-than trusting either file.
+so it lives in `internal/parse/chars.go` and touches no branch in the scanner.
+The 324 windows-only pairs went from blocked to **648 fields, 0 wrong**, taking
+the scanner layer 50.11% → 66.04% and the headline 18.73% → 24.69%. `WINDOWS_CHARS`
+is four leaves and twelve derivations, and the one leaf that looks derivable and
+is not is docs/transcription-traps.md #54 — read it before touching that table.
+
+`strictSlashes`, `bash` and `dot` are next by pairs, and all three are branches
+rather than swaps. `docs/emit-oracle.md` holds the ranking and the ceilings;
+re-derive from `testdata/emit/summary.json` rather than trusting either file.
 
 The decline rule still governs everything added from here. Never fall back to
 plausible output: a plausible-but-wrong token stream scores as a pass wherever the
@@ -149,7 +161,7 @@ emitter under default options** has been gated at 1,491/1,491 all along.
 `testdata/emit` adds the three layers that were unmeasured — non-default options,
 `parse.fastpaths()`, and `compileRe`'s `^(?:…)$` wrap and flags. It scores
 **fields, not cases**, across 2,038 (pattern, options) pairs, and reads
-`2038 of 10879 = 18.73%, 0 wrong` today: the scanner layer at 50.11% and the
+`2686 of 10879 = 24.69%, 0 wrong` today: the scanner layer at 66.04% and the
 other three at zero. See `docs/emit-oracle.md`.
 
 ### Three fixture sets, never merged

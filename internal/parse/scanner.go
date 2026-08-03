@@ -6,13 +6,18 @@ package parse
 //
 // # Options
 //
-// [Parse] takes no options yet, so every opts.X read in upstream resolves to its
-// default here: dot, bash, capture, posix, strictBrackets, strictSlashes,
-// nobrace, nobracket, noextglob, noglobstar, nonegate, unescape, keepQuotes,
-// regex, literalBrackets, maxExtglobRecursion, prepend and expandRange are all
-// unset. Branches those keys select are marked with the key that will pick them
-// once options are threaded through, so the sites are findable rather than
-// silently baked in. `grep -n "opts\." internal/parse/*.go` is the list.
+// [Options] carries the keys this package answers, and [Parse] takes it. Today
+// that is `windows` alone — a table swap rather than a branch, so it lands as
+// chars.go rather than as anything in this file.
+//
+// Every other opts.X read in upstream still resolves to its default here: dot,
+// bash, capture, posix, strictBrackets, strictSlashes, nobrace, nobracket,
+// noextglob, noglobstar, nonegate, unescape, keepQuotes, regex, literalBrackets,
+// maxExtglobRecursion, prepend and expandRange are all unset. Branches those keys
+// select are marked with the key that will pick them, so the sites are findable
+// rather than silently baked in. `grep -n "opts\." internal/parse/*.go` is the
+// list, and [Options] says why a marked key does not get a field until its branch
+// is written.
 //
 // # What is not built yet
 //
@@ -58,54 +63,14 @@ package parse
 // parse.js is wrong — the "!" fallthrough, the JavaScript-truthy text merge, and
 // the rest. Read it first, and add to it when a new branch turns one up.
 
-// Platform constants from constants.js. These are the POSIX set; the Windows set
-// (SLASH_LITERAL "[\\/]" and friends) arrives with Options.Windows.
+// The platform constants moved to chars.go when Options.Windows was threaded
+// through: they are a table selected per parse (constants.globChars at
+// constants.js:181), not package constants, and live on the scanner as s.chars.
 //
-// The derived ones are spelled as concatenations of the constants they are built
-// from, exactly as constants.js:12-27 builds them, so that the Windows set can be
-// added by overriding the two leaves (SLASH_LITERAL and QMARK) rather than by
-// re-deriving eight strings by hand.
-const (
-	dotLiteral   = `\.`
-	slashLiteral = `\/`
-	plusLiteral  = `\+`
-	oneChar      = `(?=.)`
-	qmark        = `[^/]`
-	endAnchor    = `(?:` + slashLiteral + `|$)`
-
-	// qmarkNoDot is constants.QMARK_NO_DOT (constants.js:25). It is its own
-	// leaf, spelled `[^.` + SLASH_LITERAL + `]`, and not a composition of the
-	// two constants above: NO_DOT + QMARK would be `(?!\.)[^/]`, a lookahead
-	// followed by a class rather than one class excluding both.
-	qmarkNoDot  = `[^.` + slashLiteral + `]`
-	startAnchor = `(?:^|` + slashLiteral + `)`
-	dotsSlash   = dotLiteral + `{1,2}` + endAnchor
-	noDot       = `(?!` + dotLiteral + `)`
-	noDotSlash  = `(?!` + dotLiteral + `{0,1}` + endAnchor + `)`
-	noDotsSlash = `(?!` + dotsSlash + `)`
-
-	// capture is the binding at parse.js:374: opts.capture ? "" : "?:". It is
-	// the only thing opts.capture changes about the globstar body, so it is
-	// spelled separately rather than folded into the string below.
-	capture = `?:`
-
-	// globstarBody is the globstar() helper at parse.js:395-397 evaluated under
-	// default options — opts.dot selects DOTS_SLASH in place of DOT_LITERAL. It
-	// is a function upstream because it reads opts at each call site, and every
-	// one of those sites is in the branch at :1145-1244.
-	globstarBody = `(` + capture + `(?:(?!` + startAnchor + dotLiteral + `).)*?)`
-
-	// star is constants.STAR. Upstream rebinds it at parse.js:401-405 —
-	// opts.bash swaps in globstar(opts) and opts.capture wraps it in a group —
-	// so this is the default-options value of that binding, not only the
-	// constant.
-	star = qmark + `*?`
-
-	// nodot is the binding at parse.js:399: opts.dot ? "" : NO_DOT. It is a
-	// separate name from noDot because the option is read there and nowhere
-	// else, so that is the one site Options.Dot has to reach.
-	nodot = noDot
-)
+// capture is not among them. It is the binding at parse.js:374 —
+// opts.capture ? "" : "?:" — and depends on no platform value, so it stays a
+// constant until Options.Capture is written.
+const capture = `?:`
 
 // maxLength is constants.MAX_LENGTH, 1024 * 64.
 const maxLength = 1024 * 64
@@ -202,6 +167,35 @@ type scanner struct {
 	output   units
 	prefix   string
 
+	// opts is kept only so parse.js:588 can recurse with the same configuration.
+	// Every other read of an option happens once, before the loop, into the
+	// bindings below; reaching for s.opts anywhere else would be reading a key at
+	// a site upstream does not read it.
+	opts Options
+
+	// chars is PLATFORM_CHARS (parse.js:377) — the constants themselves.
+	chars globChars
+
+	// star, nodot and globstarBody are the bindings parse.js derives from those
+	// constants at :395-405, before the loop starts. They are fields rather than
+	// reads of chars because each is a different option's one point of entry:
+	//
+	//	globstarBody  :395  opts.dot selects DOTS_SLASH over DOT_LITERAL
+	//	nodot         :399  opts.dot selects "" — not NO_DOTS; :1353 is fastpaths
+	//	star          :401  opts.bash selects globstar(opts); opts.capture groups it
+	//
+	// The fourth binding, `qmarkNoDot` at :400, is deliberately absent. It reads
+	// as the obvious partner of the "?" branch and is not: :1041 emits the
+	// *constant* QMARK_NO_DOT, guarded by its own `opts.dot !== true`, and the
+	// binding's only reader in the whole file is :620, inside the inline fast
+	// path this package does not have. A field for it would be dead today and
+	// would invite the "?" branch to read it tomorrow, which is a different
+	// answer under opts.dot: the binding yields QMARK where the branch does not
+	// run at all. `grep -n "qmarkNoDot\|QMARK_NO_DOT" tests/original/lib/parse.js`.
+	star         string
+	nodot        string
+	globstarBody string
+
 	backtrack      bool
 	negated        bool
 	globstar       bool
@@ -234,7 +228,7 @@ type scanner struct {
 	err error
 }
 
-func newScanner(pattern string) (*scanner, error) {
+func newScanner(pattern string, opts Options) (*scanner, error) {
 	if r, ok := replacements[pattern]; ok {
 		pattern = r
 	}
@@ -249,20 +243,29 @@ func newScanner(pattern string) (*scanner, error) {
 			return nil, &LengthError{Length: n, Max: maxLength}
 		}
 	}
-	return newScannerUnits(encode(pattern)), nil
+	return newScannerUnits(encode(pattern), opts), nil
 }
 
 // newScannerUnits is everything parse() does between the length guard and the
 // loop. It is separate from newScanner because parse() calls itself at
 // parse.js:588 with a slice of its own input, which is already units — see
 // parseSuffix on why the two skipped steps cannot fire there.
-func newScannerUnits(input units) *scanner {
+func newScannerUnits(input units, opts Options) *scanner {
 	// parse.js:371. bos carries output "" rather than no output — opts.prepend
 	// defaults to the empty string, and the recording shows the field present.
 	empty := units{}
 	bos := &token{typ: "bos", value: units{}, output: &empty}
 
 	s := &scanner{index: -1, tokens: []*token{bos}, bos: bos, prev: bos}
+
+	// parse.js:377 and :395-405. The table first, then the four bindings taken
+	// off it — in upstream's order, because globstarBody reads two of the
+	// constants and star would read globstarBody once opts.bash is written.
+	s.opts = opts
+	s.chars = globCharsFor(opts.Windows)
+	s.globstarBody = `(` + capture + `(?:(?!` + s.chars.startAnchor + s.chars.dotLiteral + `).)*?)`
+	s.nodot = s.chars.noDot // opts.dot selects "" at parse.js:399
+	s.star = s.chars.star   // opts.bash selects globstar(opts) at parse.js:401
 
 	// parse.js:430, utils.removePrefix. This runs before the loop, so the rest
 	// of the scanner never sees a leading "./" and state.consumed is not a
@@ -424,7 +427,7 @@ func (s *scanner) push(t *token) {
 			s.output = dropLast(s.output, len(*s.prev.output))
 			s.prev.typ = "star"
 			s.prev.value = encode("*")
-			s.prev.output = out(star)
+			s.prev.output = out(s.star)
 			s.output = append(s.output, *s.prev.output...)
 		}
 	}
@@ -662,7 +665,7 @@ func (s *scanner) run() error {
 							// opts.prepend as well as for a missing field.
 							if (s.bos.output == nil || len(*s.bos.output) == 0) &&
 								len(s.tokens) > 1 && s.tokens[1] == s.prev {
-								s.bos.output = out(oneChar)
+								s.bos.output = out(s.chars.oneChar)
 							}
 							continue
 						}
@@ -1019,7 +1022,7 @@ func (s *scanner) run() error {
 				continue
 			}
 
-			s.push(&token{typ: "slash", value: value, output: out(slashLiteral)})
+			s.push(&token{typ: "slash", value: value, output: out(s.chars.slashLiteral)})
 			if s.err != nil {
 				return s.err
 			}
@@ -1040,7 +1043,7 @@ func (s *scanner) run() error {
 				// output — starGuard (:1264) appends the dot guard to a prev of
 				// type "dot".
 				if isUnit(s.prev.value, '.') {
-					s.prev.output = out(dotLiteral)
+					s.prev.output = out(s.chars.dotLiteral)
 				}
 				if s.prev.output == nil {
 					// JavaScript's `undefined + "."` is the string "undefined.",
@@ -1059,13 +1062,13 @@ func (s *scanner) run() error {
 			}
 
 			if s.braces+s.parens == 0 && s.prev.typ != "bos" && s.prev.typ != "slash" {
-				s.push(&token{typ: "text", value: value, output: out(dotLiteral)})
+				s.push(&token{typ: "text", value: value, output: out(s.chars.dotLiteral)})
 				if s.err != nil {
 					return s.err
 				}
 				continue
 			}
-			s.push(&token{typ: "dot", value: value, output: out(dotLiteral)})
+			s.push(&token{typ: "dot", value: value, output: out(s.chars.dotLiteral)})
 			if s.err != nil {
 				return s.err
 			}
@@ -1118,7 +1121,7 @@ func (s *scanner) run() error {
 			// the dot and the separator rather than a lookahead in front of
 			// QMARK.
 			if s.prev.typ == "slash" || s.prev.typ == "bos" { // opts.dot
-				s.push(&token{typ: "qmark", value: value, output: out(qmarkNoDot)})
+				s.push(&token{typ: "qmark", value: value, output: out(s.chars.qmarkNoDot)})
 				if s.err != nil {
 					return s.err
 				}
@@ -1129,7 +1132,7 @@ func (s *scanner) run() error {
 			// an astral character is matched by two "?" and not by one. The
 			// second of the three sites that force units over a Go string, and
 			// the one no fixture in testdata/original can see. DECISIONS.md §8.
-			s.push(&token{typ: "qmark", value: value, output: out(qmark)})
+			s.push(&token{typ: "qmark", value: value, output: out(s.chars.qmark)})
 			if s.err != nil {
 				return s.err
 			}
@@ -1167,7 +1170,7 @@ func (s *scanner) run() error {
 				continue
 			}
 			if s.prev != nil && s.prev.value.equal(encode("(")) { // opts.regex === false
-				s.push(&token{typ: "plus", value: value, output: out(plusLiteral)})
+				s.push(&token{typ: "plus", value: value, output: out(s.chars.plusLiteral)})
 				if s.err != nil {
 					return s.err
 				}
@@ -1180,7 +1183,7 @@ func (s *scanner) run() error {
 				}
 				continue
 			}
-			s.push(&token{typ: "plus", value: encode(plusLiteral)})
+			s.push(&token{typ: "plus", value: encode(s.chars.plusLiteral)})
 			if s.err != nil {
 				return s.err
 			}
@@ -1231,7 +1234,7 @@ func (s *scanner) run() error {
 			s.prev.typ = "star"
 			s.prev.star = true
 			s.prev.value = append(s.prev.value, value...)
-			s.prev.output = out(star)
+			s.prev.output = out(s.star)
 			s.backtrack = true
 			s.globstar = true
 			s.consume(value, 0)
@@ -1311,7 +1314,7 @@ func (s *scanner) run() error {
 			if prior.typ == "bos" && s.eos() {
 				s.prev.typ = "globstar"
 				s.prev.value = append(s.prev.value, value...)
-				s.prev.output = out(globstarBody)
+				s.prev.output = out(s.globstarBody)
 				s.output = s.prev.output.clone()
 				s.globstar = true
 				s.consume(value, 0)
@@ -1332,7 +1335,7 @@ func (s *scanner) run() error {
 
 				s.prev.typ = "globstar"
 				// opts.strictSlashes emits ")" in place of "|$)".
-				s.prev.output = out(globstarBody + `|$)`)
+				s.prev.output = out(s.globstarBody + `|$)`)
 				s.prev.value = append(s.prev.value, value...)
 				s.globstar = true
 				s.output = append(s.output, *prior.output...)
@@ -1356,7 +1359,7 @@ func (s *scanner) run() error {
 				prior.output = &po
 
 				s.prev.typ = "globstar"
-				s.prev.output = out(globstarBody + slashLiteral + `|` + slashLiteral + end + `)`)
+				s.prev.output = out(s.globstarBody + s.chars.slashLiteral + `|` + s.chars.slashLiteral + end + `)`)
 				s.prev.value = append(s.prev.value, value...)
 
 				s.output = append(s.output, *prior.output...)
@@ -1380,7 +1383,7 @@ func (s *scanner) run() error {
 			if prior.typ == "bos" && len(rest) > 0 && rest[0] == '/' {
 				s.prev.typ = "globstar"
 				s.prev.value = append(s.prev.value, value...)
-				s.prev.output = out(`(?:^|` + slashLiteral + `|` + globstarBody + slashLiteral + `)`)
+				s.prev.output = out(`(?:^|` + s.chars.slashLiteral + `|` + s.globstarBody + s.chars.slashLiteral + `)`)
 				s.output = s.prev.output.clone() // assigned, not appended — trap #18
 				s.globstar = true
 
@@ -1398,7 +1401,7 @@ func (s *scanner) run() error {
 			// put the globstar body in its place.
 			s.output = dropLast(s.output, len(*s.prev.output))
 			s.prev.typ = "globstar"
-			s.prev.output = out(globstarBody)
+			s.prev.output = out(s.globstarBody)
 			s.prev.value = append(s.prev.value, value...)
 			s.output = append(s.output, *s.prev.output...)
 			s.globstar = true
@@ -1408,7 +1411,7 @@ func (s *scanner) run() error {
 
 		// parse.js:1246. out() encodes a fresh slice per call; a shared package
 		// slice would be appended to in place by the guard below.
-		tok := &token{typ: "star", value: value, output: out(star)}
+		tok := &token{typ: "star", value: value, output: out(s.star)}
 
 		// parse.js:1248 (opts.bash) and :1257 (opts.regex === false with a
 		// bracket or paren prev) cannot be reached under default options. Both
@@ -1419,9 +1422,9 @@ func (s *scanner) run() error {
 		// start moves past a negation prologue and past a "./" that survived
 		// behind one, so "!*" and "!./*" take this arm at index 1 and 3.
 		if s.index == s.start || s.prev.typ == "slash" || s.prev.typ == "dot" {
-			guard := nodot // opts.dot selects noDotsSlash at parse.js:1270
+			guard := s.nodot // opts.dot selects noDotsSlash at parse.js:1270
 			if s.prev.typ == "dot" {
-				guard = noDotSlash
+				guard = s.chars.noDotSlash
 			}
 			s.starGuard(guard)
 
@@ -1429,7 +1432,7 @@ func (s *scanner) run() error {
 			// suppresses the one-character guard even though the second star is
 			// not consumed here.
 			if !s.peekIs(1, '*') {
-				s.starGuard(oneChar)
+				s.starGuard(s.chars.oneChar)
 			}
 		}
 
@@ -1468,7 +1471,7 @@ func (s *scanner) run() error {
 	// parse.js:1304-1306, opts.strictSlashes. Both producers of those types are
 	// now built, so both arms are live.
 	if s.prev.typ == "star" || s.prev.typ == "bracket" {
-		s.push(&token{typ: "maybe_slash", value: units{}, output: out(slashLiteral + "?")})
+		s.push(&token{typ: "maybe_slash", value: units{}, output: out(s.chars.slashLiteral + "?")})
 		if s.err != nil {
 			return s.err
 		}

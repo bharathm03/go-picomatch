@@ -192,7 +192,15 @@ func TestTokenParity(t *testing.T) {
 // almost every case fails, and a report that listed every field of every token
 // would be unreadable at exactly the moment it needs to be read.
 func compareTokens(c *tokencase.Case) (string, *parse.UnsupportedError) {
-	got, err := parse.Parse(c.Pattern)
+	// Default options, unconditionally. testdata/tokens has no options axis:
+	// tools/tokens/generate.js:63 records under `{fastpaths: false}` and nothing
+	// else, and that is not a configurable key here — it is what parse.Parse
+	// *is*, the form picomatch.parse itself always calls (picomatch.js:212), so
+	// the Go zero value already means it. There is nothing on the case to thread
+	// through, and inventing one would score the port against a configuration the
+	// recording was not made under. The option surface is testdata/emit's axis,
+	// and emit_test.go is where it is scored.
+	got, err := parse.Parse(c.Pattern, parse.Options{})
 	if err != nil {
 		// Not-implemented is a failure, never a skip — the same rule
 		// compareError applies in the conformance harness. Scoring it any other
@@ -507,7 +515,7 @@ func TestCompareTokenDetectsDifferences(t *testing.T) {
 func TestCompareTokensChecksStateAndLength(t *testing.T) {
 	const pattern = "a/b"
 
-	st, err := parse.Parse(pattern)
+	st, err := parse.Parse(pattern, parse.Options{})
 	if err != nil {
 		t.Fatalf("Parse(%q): %v", pattern, err)
 	}
@@ -569,7 +577,7 @@ func TestCompareTokensChecksStateAndLength(t *testing.T) {
 		t.Log("every candidate construct is built; nothing left here to classify as unbuilt")
 		return
 	}
-	partial, err := parse.Parse(declined)
+	partial, err := parse.Parse(declined, parse.Options{})
 	if !errors.Is(err, parse.ErrUnsupported) {
 		t.Fatalf("Parse(%q): want ErrUnsupported, got %v", declined, err)
 	}
@@ -582,7 +590,7 @@ func TestCompareTokensChecksStateAndLength(t *testing.T) {
 // once every candidate is built.
 func firstDeclinedConstruct() (string, bool) {
 	for _, p := range []string{"a*", "a?", "a[b]", "a{b,c}", "a(b)", "a@(b)", "a+(b)", "a!(b)"} {
-		if _, err := parse.Parse(p); errors.Is(err, parse.ErrUnsupported) {
+		if _, err := parse.Parse(p, parse.Options{}); errors.Is(err, parse.ErrUnsupported) {
 			return p, true
 		}
 	}

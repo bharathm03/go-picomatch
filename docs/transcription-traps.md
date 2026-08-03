@@ -1586,6 +1586,92 @@ the literal `$^`: `a\\(b` under defaults, `[[:alpha:]\]` under
 `{posix, regex, strictSlashes}`, and the 65,504-unit `[!(\\…` pattern. Same
 re-check as trap #52 — the `fallback: 3` column.
 
+## 54. `WINDOWS_CHARS` is four leaves and twelve derivations, and one leaf looks derivable — `constants.js:52-66`
+
+```js
+const WIN_SLASH = '\\/';
+const WIN_NO_SLASH = `[^${WIN_SLASH}]`;
+
+const QMARK_NO_DOT = `[^.${SLASH_LITERAL}]`;      // POSIX, :25
+
+const WINDOWS_CHARS = {
+  ...POSIX_CHARS,
+  SLASH_LITERAL: `[${WIN_SLASH}]`,
+  QMARK_NO_DOT:  `[^.${WIN_SLASH}]`,               // :61 — WIN_SLASH, not SLASH_LITERAL
+  ...
+};
+```
+
+`WINDOWS_CHARS` reads as twelve independent overrides. It is not: four of them
+are leaves — `SLASH_LITERAL`, `QMARK`, `QMARK_NO_DOT`, `SEP` — and the other
+eight fall straight out of the same expressions `constants.js:18-26` uses for the
+POSIX set, with the new leaves substituted. Re-deriving them by hand is eight
+chances to transcribe a string wrong for no benefit.
+
+**The wrong reading.** Concluding from that structure that `QMARK_NO_DOT` is a
+derivation too. Its POSIX spelling *is* one — `[^.${SLASH_LITERAL}]` — and it is
+the only key whose two definitions read the same expression against different
+variables. Substituting the Windows `SLASH_LITERAL` into the POSIX expression
+gives
+
+```
+[^.[\/]]      instead of      [^.\/]
+```
+
+a character class that opens another character class. It is the wrong regex, and
+in JavaScript it is not even a syntax error: `[^.[\/]]` compiles, matches one
+character that is not `.`, `[`, `\` or `/`, and then requires a literal `]`. So
+the mistake survives compilation and surfaces as a handful of patterns quietly
+not matching.
+
+The cause is that `SLASH_LITERAL` changes *shape* between platforms — an escaped
+character on POSIX, a whole bracketed class on Windows — while `WIN_SLASH` is the
+class *body*. Any POSIX expression that puts `SLASH_LITERAL` inside brackets is
+therefore not the Windows expression. `QMARK_NO_DOT` is the only one that does,
+which is why `QMARK` (`[^/]`, spelled with a bare `/` rather than
+`${SLASH_LITERAL}`) is a leaf as well and not an oversight.
+
+**What it costs.** Small enough to be missed, which is the point: 4 of the 2,038
+recorded pairs contain `QMARK_NO_DOT` in a Windows output at all, so the emitter
+gate reports the regression as `wrong=4` and a headline that moves by 0.04
+points. `internal/parse.TestQmarkNoDotIsALeaf` fails on it by name instead.
+
+**Re-check.** Save this **in the repo root** — `require` resolves relative to the
+script, not the shell — and run `node <file>`. It has to be a file for the reason
+trap #52 gives: Git Bash on Windows eats the backslash runs in a pasted one-liner
+and every Windows leaf silently comes back as its POSIX value, which makes the
+check pass against itself. It re-derives both tables from the four leaves and
+prints `exact on all 16` twice.
+
+```js
+const C = require('./tests/original/lib/constants.js');
+const derive = (SLASH_LITERAL, QMARK, SEP, QMARK_NO_DOT) => {
+  const DOT_LITERAL = '\\.';
+  const END_ANCHOR = `(?:${SLASH_LITERAL}|$)`;
+  const START_ANCHOR = `(?:^|${SLASH_LITERAL})`;
+  const DOTS_SLASH = `${DOT_LITERAL}{1,2}${END_ANCHOR}`;
+  return {
+    DOT_LITERAL, PLUS_LITERAL: '\\+', QMARK_LITERAL: '\\?', SLASH_LITERAL,
+    ONE_CHAR: '(?=.)', QMARK, END_ANCHOR, DOTS_SLASH,
+    NO_DOT: `(?!${DOT_LITERAL})`,
+    NO_DOTS: `(?!${START_ANCHOR}${DOTS_SLASH})`,
+    NO_DOT_SLASH: `(?!${DOT_LITERAL}{0,1}${END_ANCHOR})`,
+    NO_DOTS_SLASH: `(?!${DOTS_SLASH})`,
+    QMARK_NO_DOT, STAR: `${QMARK}*?`, START_ANCHOR, SEP
+  };
+};
+
+for (const [win, got] of [
+  [false, derive('\\/', '[^/]', '/', '[^.\\/]')],
+  [true,  derive('[\\\\/]', '[^\\\\/]', '\\', '[^.\\\\/]')]
+]) {
+  const want = C.globChars(win);
+  const bad = Object.keys(want).filter(k => got[k] !== want[k]);
+  console.log(win ? 'win  ' : 'posix',
+    bad.length ? 'MISMATCH ' + bad.join(',') : 'exact on all ' + Object.keys(want).length);
+}
+```
+
 ---
 
 ## Related
