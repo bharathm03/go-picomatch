@@ -171,11 +171,20 @@ rest are not. It reaches `constants.globChars` and nothing else, so it landed as
 `internal/parse/chars.go` — a table selected per parse — without touching a
 branch in the scanner.
 
-Which of the rest to write first is measured, not a matter of taste:
-`strictSlashes` 245 pairs, `bash` 235, `dot` 207, then a tail ending at 1
-(`windows` led at 570 before it was threaded). The four together fully unblock
-882 of the 1,018 non-default pairs. Full ranking and derivation in
-[emit-oracle.md](emit-oracle.md) §4.
+Which of the rest to write first is measured, not a matter of taste. Raw pairs
+rank `strictSlashes` 245, `bash` 235, `dot` 207, then a tail ending at 1
+(`windows` led at 570 before it was threaded) — but raw pairs overstate two of
+the three the same way 570 overstated `windows` before the real figure was
+324-alone. Re-run on top of `windows` already answered: `bash` is genuinely
+independent and its solo figure equals its raw count (235); `dot` and
+`strictSlashes` share 78 pairs that need both, and `strictSlashes` has a
+further 51-pair tail that needs `posix` and `regex` too. Recommended build
+order is **`bash`, then `strictSlashes`, then `dot`** — the independent win
+first, then the two isolated sites, then the branch that reshapes bindings
+(`globstarBody`, `nodot`) five other call sites already depend on. All three
+together reach 1,902 of 2,038 pairs (93.33%), regardless of which of `dot` /
+`strictSlashes` goes second. Full derivation, site inventory and re-check
+commands in [emit-oracle.md](emit-oracle.md) §4.
 
 Two things `windows` established that the next three will not inherit. The
 Windows constants table is **four** leaves and twelve derivations, not two, and

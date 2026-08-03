@@ -52,9 +52,15 @@ the scanner layer 50.11% → 66.04% and the headline 18.73% → 24.69%. `WINDOWS
 is four leaves and twelve derivations, and the one leaf that looks derivable and
 is not is docs/transcription-traps.md #54 — read it before touching that table.
 
-`strictSlashes`, `bash` and `dot` are next by pairs, and all three are branches
-rather than swaps. `docs/emit-oracle.md` holds the ranking and the ceilings;
-re-derive from `testdata/emit/summary.json` rather than trusting either file.
+`strictSlashes`, `bash` and `dot` are next by raw pairs (245/235/207), and all
+three are branches rather than swaps. Raw pairs overstate two of them, the same
+way 570 overstated `windows`: `bash` alone accounts for its full 235 (no corpus
+pair combines it with an unbuilt key), while `dot` and `strictSlashes` share 78
+pairs that need both built. Recommended order is `bash`, then `strictSlashes`,
+then `dot` — the independent win first, the two isolated sites next, the branch
+that reshapes shared bindings (`globstarBody`, `nodot`) last. `docs/emit-oracle.md`
+§4 holds the derivation and site inventory; re-derive from
+`testdata/emit/summary.json` rather than trusting either file.
 
 The decline rule still governs everything added from here. Never fall back to
 plausible output: a plausible-but-wrong token stream scores as a pass wherever the

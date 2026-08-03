@@ -246,6 +246,70 @@ Two corrections to the prose above it, both found in the writing:
 `strictSlashes` (245) is next by pairs, then `bash` (235) and `dot` (207). Unlike
 `windows`, all three are branches.
 
+**But the raw pair counts overstate two of the three**, the same way 570 overstated
+`windows` before the real figure turned out to be 324-alone. A key's raw count
+includes every pair that sets it *alongside* another still-unbuilt key, and only
+building that key too realizes the rest. Re-running the same "attemptable if
+these keys and no others are set" query used for `windows`, now with `windows`
+already answered:
+
+| Key | Solo (on top of `windows`) | Raw pairs | Combines with |
+|---|---:|---:|---|
+| `bash` | **235** | 235 | nothing — every `bash` pair sets no other unbuilt key |
+| `dot` | 129 | 207 | `strictSlashes` (78 pairs set both) |
+| `strictSlashes` | 116 | 245 | `dot` (78), and `posix`+`regex` (51, needs two more keys) |
+
+`bash` is the one key here that behaves like `windows` did: its solo figure
+*equals* its raw count, because no corpus pair ever asks for `bash` together with
+an unbuilt key. `dot` and `strictSlashes` overlap each other on 78 pairs, so
+building either one first only realizes part of its raw total; the other 78 land
+the moment the second of the two is built, regardless of order. `strictSlashes`'s
+raw 245 also hides a 51-pair tail that needs `posix` and `regex` as well — a
+third and fourth key, not just these three — so even building all of `dot`,
+`bash` and `strictSlashes` leaves those 51 blocked.
+
+Staging them (each on top of `windows`, already answered):
+
+```
+windows only:                                        1344 / 2038  65.95%
++ bash            (independent)             +235 ->  1579 / 2038  77.48%
++ strictSlashes   (solo 116, + combos as dot lands)   +116 ->  1695 / 2038  83.17%
++ dot             (solo 129, + the 78 shared with strictSlashes)  +207 -> 1902 / 2038  93.33%
+```
+
+The total after all three (1,902) does not depend on build order — `dot` and
+`strictSlashes` are additive with each other regardless of which is built
+first — but the order above is the one worth using anyway, because pair count
+is not the only cost. Site inventory, from the `// opts.X` markers already
+sitting in `internal/parse/scanner.go` and `chars.go`:
+
+- **`bash`** — 4 sites: the `star` binding at setup (parse.js:401,
+  `scanner.go:268`), an escaped-`/` guard (:675, `scanner.go:555`), one guard
+  inside the globstar arms (:1156, `scanner.go:1275`), and a star-token override
+  (:1248, `scanner.go:1416`). Touches the shared `star` binding, but zero
+  corpus pairs combine it with `dot` or `strictSlashes`, so there is no
+  interaction to get wrong.
+- **`strictSlashes`** — 2 sites, both isolated: a globstar tail-slash
+  arm's closing paren vs. `|$)` (:1193, `scanner.go:1337`), and the end-of-loop
+  `maybe_slash` push, which is currently unconditional and needs the
+  `!== true` guard added (:1304, `scanner.go:1471`). Neither touches a
+  binding shared with anything else — the smallest, least entangled of the
+  three.
+- **`dot`** — 4 sites, but the widest blast radius: it changes the shape of
+  `globstarBody` itself (`DOTS_SLASH` vs. `DOT_LITERAL`, parse.js:396,
+  `scanner.go:266`, currently hardcoded to the `DOT_LITERAL` arm) and `nodot`
+  (:399, `scanner.go:267`, currently hardcoded to `NO_DOT`), both of which feed
+  every globstar arm downstream, plus the qmark guard (:1040,
+  `scanner.go:1123`) and the star guard (:1268, `scanner.go:1425`). The fourth
+  binding parse.js:400 derives, `qmarkNoDot`, is deliberately not stored — its
+  only reader is the inline fast path, which this package does not have yet
+  (`scanner.go:187-194`).
+
+Recommended order: **`bash`, then `strictSlashes`, then `dot`** — biggest
+independent win first, then the two isolated sites, then the branch that
+touches bindings five other call sites already depend on, once there is less
+still-unbuilt code around it to interact badly with.
+
 **The record-level ranking in an earlier draft does not reproduce** (`windows`
 3240, `strictSlashes` 1840, `dot` 1668, `bash` 1132, `regex` 300, `posix` 296,
 `unescape` 70 …). The measured record counts are the right-hand column above, and
@@ -274,6 +338,27 @@ console.log({nonDefault:nd.length,
 fullyCoveredByTopFour:nd.filter(x=>Object.keys(x.options).every(k=>four.includes(k))).length,
 touchingOne:nd.filter(x=>Object.keys(x.options).some(k=>four.includes(k))).length,
 windowsOnly:nd.filter(x=>Object.keys(x.options).every(k=>k==='windows')).length})"
+```
+
+The staging table above (solo counts, order-independence, the 78- and 51-pair
+overlaps):
+
+```bash
+node -e "
+const r=require('fs').readFileSync('testdata/emit/cases.jsonl','utf8').trim().split('\n').map(JSON.parse);
+const attemptable=ans=>r.filter(x=>Object.keys(x.options).every(k=>ans.has(k))).length;
+const pct=n=>(100*n/r.length).toFixed(2)+'%';
+const ans=new Set(['windows']);
+console.log('windows only', attemptable(ans), pct(attemptable(ans)));
+for (const k of ['bash','strictSlashes','dot']) {
+  const before=attemptable(ans); ans.add(k); const after=attemptable(ans);
+  console.log('+'+k, after, pct(after), 'delta', after-before);
+}
+const solo=(k, base)=>r.filter(x=>{const e=Object.keys(x.options).filter(o=>!base.has(o));return e.length===1&&e[0]===k}).length;
+console.log('solo bash (on windows)', solo('bash', new Set(['windows'])));
+console.log('solo dot (on windows)', solo('dot', new Set(['windows'])));
+console.log('solo strictSlashes (on windows)', solo('strictSlashes', new Set(['windows'])));
+"
 ```
 
 ---
